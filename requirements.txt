@@ -1,0 +1,36 @@
+# The engine + Gym env. This is all `python -m pytest tests/` needs.
+#
+# The upper bound on gymnasium is not decoration. `gymnasium>=1.0` with no
+# ceiling is how `train.py --expedition` and the fixed mode came to be broken
+# for an unknown length of time: gymnasium removed `Wrapper.__getattr__`, so
+# the ActionMasker callable stopped reaching `action_masks` through a
+# `TimeLimit`, and only `--full-expedition` (the one TimeLimit-exempt mode)
+# kept working. Nothing failed loudly. See env/gym_env.py::mask_fn and
+# tests/test_train_wiring.py, which now pins all three modes.
+gymnasium>=1.0,<2
+numpy>=2.0
+
+# RL training/eval: train.py, eval_expedition.py, tools/*.py, bridge/rollout.py.
+# Not needed to run the test suite's engine/data tests, but tests/test_train_wiring.py
+# and tests/test_rollout.py import sb3_contrib.
+stable-baselines3>=2.9,<3
+sb3-contrib>=2.9,<3
+torch>=2.0
+
+# Test runner. `-n auto` (pytest.ini) needs xdist; the suite is ~800 tests and
+# the machine has 16 cores.
+pytest>=8
+pytest-xdist>=3
+ruff>=0.14              # the lint gate; tests/suite/test_lint.py skips without it
+
+# Reading the game binary (`tools/pe_anchors.py`, DECOMP.md). Optional and not
+# imported anywhere yet: the anchor scan is pure Python + numpy today, and the
+# suite and the trainer neither need nor import capstone. It is here for the
+# precision upgrade that scan wants -- without a disassembler it cannot see
+# where instructions begin, so it over-reports every cross-reference; with one,
+# a hit is an instruction rather than four bytes that happened to hold the
+# right value. Any use of it must stay behind a guarded import.
+#
+# The decompiler itself is NOT a pip dependency: Ghidra 12.1.3 lives outside the
+# repo (D:\ghidra) and needs a JDK 21, both documented in DECOMP.md.
+capstone>=5

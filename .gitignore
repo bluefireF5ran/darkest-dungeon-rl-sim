@@ -1,0 +1,64 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+
+# Run artifacts. train.py/eval_expedition.py are invoked with stdout redirected;
+# CLAUDE.md's rule is that those land in archive/logs/ once read, never the root.
+*.log
+!app.log
+# The structured journal beside each --log (bridge/journal.py). It APPENDS,
+# so it grows with every session played and is scratch by default -- a
+# recording that becomes evidence moves to archive/traces/ deliberately,
+# the same rule a dbwin capture follows.
+*.jsonl
+!archive/traces/*.jsonl
+
+# Checkpoints. models/ holds the 3 live ones and logs/ is SB3 EvalCallback output;
+# both are regenerable and together with archive/ they were 180 MB of the 308 MB.
+models/*.zip
+logs/
+archive/models/
+archive/logs/
+
+# Local caches
+.ddsim_cache/
+
+# archive/traces/ is deliberately NOT ignored: raidsnaps*/ is the captured-save
+# corpus that tests/test_run.py, test_dungeon_map.py, test_live_bridge.py and
+# test_route.py assert against. It is a test fixture, not scratch.
+
+# Throwaway wiring-check output from `train.py --smoke`
+models/_smoke_*.zip
+logs/_smoke_*/
+
+# The map panel `bridge/act.py` banks when it stops in front of one
+# (`act.MAP_SHOT`). Overwritten every run, and the input to a measurement --
+# once it IS measured the useful frame gets a real name and is committed.
+# The leading underscore IS the convention: a frame the bridge banked, or one
+# grabbed while probing. It is the INPUT to a measurement -- once measured, the
+# useful frame gets a real name and is committed. `captures/screens/` is the
+# opposite and is tracked: those are named references `screen.py --capture`
+# writes, and they ARE the corpus recognition runs against.
+captures/_*.png
+
+# A copy of the real Steam save profiles, taken before letting the actuator
+# click anywhere near a save list. User data, and never this repo's to carry.
+archive/save_backup_*/
+
+# `bridge/reset.py`'s claim journal for the LIVE save root -- which save slot
+# the overnight loop owns right now, so a crash cannot leave a slot unownable.
+# Machine-local runtime state, and it accumulates pytest temp paths besides.
+# Tests write to their own root via `journal_for(save_root)`.
+archive/reset_claims.json
+
+# The affliction-arm driver's own stdout. The four train_*.log / eval_*.log it
+# produces are already covered by *.log above.
+run_affliction_arm.out
+
+# safe_run holds this while a guarded job is running; never committed.
+.safe_run.lock
+
+# Machine-specific Workshop paths, written by this session for convenience.
+.mod_dirs.txt

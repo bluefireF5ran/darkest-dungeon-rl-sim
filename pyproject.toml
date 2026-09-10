@@ -1,0 +1,81 @@
+# Packaging metadata and the lint configuration.
+#
+# `pytest.ini` remains the pytest configuration -- deliberately. It carries
+# sixty lines of measured commentary about why `-n 8 --dist loadgroup` is a
+# MEMORY dial rather than a speed one, and moving that into a TOML table would
+# cost the comments their place next to the setting they explain. pytest
+# prefers `pytest.ini` over `pyproject.toml` whenever both exist, and this file
+# deliberately declares no `[tool.pytest.ini_options]`.
+#
+# Installing is optional. Every entry point still works by path
+# (`python bridge/run.py`, `python tests/engine/test_combat.py`), because every
+# module bootstraps `sys.path` itself. `pip install -e .` is for editors and
+# type checkers that want a real package to resolve.
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ddsim"
+version = "0.1.0"
+description = "A faithful Darkest Dungeon combat simulator, its Gymnasium environment, and a bridge that plays the running game"
+readme = "README.md"
+# Only 3.14 is actually exercised. 3.11 is the believed floor -- the code uses
+# `X | Y` annotations and `list[str]` throughout -- and nothing below it is
+# tested, so treat the lower bound as a claim about syntax, not about support.
+requires-python = ">=3.11"
+
+dependencies = [
+    "gymnasium>=1.0,<2",
+    "numpy>=2.0",
+    "stable-baselines3>=2.9,<3",
+    "sb3-contrib>=2.9,<3",
+    "torch>=2.0",
+    "capstone>=5",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-xdist>=3",
+    "ruff>=0.14",
+]
+
+# Flat layout with several top-level packages, so setuptools is told exactly
+# what to install rather than left to guess (its auto-discovery refuses a tree
+# like this one). `tools/` and `tests/` are deliberately absent: neither has an
+# `__init__.py`, both are run by path, and neither is something to install.
+[tool.setuptools]
+packages = ["data", "engine", "env", "bridge"]
+py-modules = ["train", "eval_expedition"]
+
+[tool.ruff]
+exclude = ["archive", "captures", "metadata", "models", "logs", ".pytest_cache"]
+
+[tool.ruff.lint]
+# **Rules this codebase already follows, and nothing else.** The point of the
+# gate is to catch a new bug, not to relitigate 60,000 lines of existing style,
+# so the set was chosen by measuring: these four report zero across the repo,
+# and the ones left out report 280.
+#
+# What is deliberately NOT here, with the count and the reason:
+#
+#   F401 unused-import (229) -- a re-export is an unused import on purpose.
+#       `env/gym_env.py` re-exports GAME_DIR/CSV_DIR for ~33 importers and
+#       `engine/__init__.py` is nothing but re-exports. Auto-fixing it would
+#       break both, and annotating 229 sites to protect a handful is not worth
+#       what it costs to read.
+#   F541 f-string-missing-placeholders (35) -- cosmetic.
+#   F841 unused-variable (16) -- often a deliberately-named intermediate in a
+#       long calculation, which is the house style here.
+#   B008 function-call-in-default-argument (2) -- both are `iter(...)` defaults
+#       in test scaffolding, where the shared-state hazard is the intent.
+#
+# The four that ARE here all describe code that is simply wrong, and enabling
+# them found four real defects on the first run: two NameErrors (one of which
+# broke the documented `python tests/training/test_train_wiring.py` script
+# path outright, and one which would have turned a graceful skip into a crash
+# on any machine without the game installed) and two string annotations naming
+# a module imported only inside the function.
+select = ["F821", "F811", "E722", "B006"]

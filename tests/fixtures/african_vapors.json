@@ -1,0 +1,24 @@
+{
+    "teamName": "African Vapors",
+    "location": "The Ruins",
+    "heroes": [
+        {
+            "heroClass": "Crusader",
+            "activeSkills": ["Smite", "Stunning Blow", "Battle Heal", "Inspiring Cry"],
+            "activeCampSkills": ["Encourage", "Wound Care", "Stand Tall", "Zealous Speech"],
+            "trinket1": "Ancestor's Pen",
+            "trinket2": "Surgical Gloves",
+            "quirks": { "positive": ["tough"], "negative": ["clumsy"] },
+            "lockedQuirks": { "positive": [], "negative": [] }
+        },
+        {
+            "heroClass": "Vestal",
+            "activeSkills": ["Judgement", "Divine Grace", "Dazzling Light", "Divine Comfort"],
+            "activeCampSkills": ["Encourage", "Wound Care", "Pray", "Bless"],
+            "trinket1": "Ancestor's Scroll",
+            "trinket2": "Tome of Holy Healing",
+            "quirks": { "positive": ["hippocratic"], "negative": [] },
+            "lockedQuirks": { "positive": [], "negative": [] }
+        }
+    ]
+}

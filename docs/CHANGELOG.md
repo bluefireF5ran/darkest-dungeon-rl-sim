@@ -1,0 +1,263 @@
+# CHANGELOG.md — fidelity fixes and findings, by subsystem
+
+The detailed record of *why* this simulator works the way it does: the real bugs found, the game-data evidence that proved them, and the reasoning behind each simulator convention.
+
+**Organized chronologically, newest first** -- which is what a changelog is for; the entry titles are the subject index. It began as the full CLAUDE.md and was split out when that file grew too large to load into every session, and was split again by period on 2026-09-07. `CLAUDE.md` now carries the distilled invariants and points here for the story behind any one of them.
+
+**Read this when**: you're about to change engine behaviour, you think you've found a bug, or a number in the code looks arbitrary and you want to know whether it was derived or chosen. Many entries exist specifically to stop a fix being reverted by someone who didn't know why it was made.
+
+**Precedence**: `ASSUMPTIONS.md` is the live source of truth for implemented-vs-stubbed. `CLAUDE.md` is the working guidance. This file is the historical justification — accurate as written, but for anything actively tuned (reward constants, observation width), read the constant in the source.
+
+
+## Index
+
+16,647 lines and 241 entries, split by period on 2026-09-07. The order is
+unchanged -- newest first -- and the split is a contiguous cut, so
+concatenating the files below in this order reproduces the original.
+
+- [`docs/changelog/2026-09.md`](changelog/2026-09.md) -- September 2026, 49 entries, 3948 lines
+- [`docs/changelog/2026-08.md`](changelog/2026-08.md) -- August 2026, 192 entries, 12698 lines
+
+### Every entry, newest first
+
+- 2026-09-07  The map panel was hiding the curio panel's X  <sub>2026-09</sub>
+- 2026-09-07  Gathering the loot after the quest is won  <sub>2026-09</sub>
+- 2026-09-06  The hunger check has two looks and the answer had no focus  <sub>2026-09</sub>
+- 2026-09-06  The save lags, and three layers read that as "it did not happen"  <sub>2026-09</sub>
+- 2026-09-06  The overlay the Hamlet is drawn under  <sub>2026-09</sub>
+- 2026-09-06  Four ways to stand still, found by driving one tutorial  <sub>2026-09</sub>
+- 2026-09-06  Two adjacent lines of one block disagreed, and the party went home  <sub>2026-09</sub>
+- 2026-09-06  The torch snuff, and two ways to refute a working click  <sub>2026-09</sub>
+- 2026-09-06  The loot layer's first live raid  <sub>2026-09</sub>
+- 2026-09-06  The route planner reads the loot tables  <sub>2026-09</sub>
+- 2026-09-05  THE SAVE KEEPS THE MARCHING ORDER, NOT THE FORMATION  <sub>2026-09</sub>
+- 2026-09-03  Endless mode: battles held before the party loses someone  <sub>2026-09</sub>
+- 2026-09-03  The fight-length gap did not survive being controlled  <sub>2026-09</sub>
+- 2026-09-03  The live-bridge session that unblocked itself  <sub>2026-09</sub>
+- 2026-09-03  The demonstration corpus: `bridge/journal.py`  <sub>2026-09</sub>
+-             A checkpoint at the wrong width now REFUSES instead of raising per turn  <sub>2026-09</sub>
+- 2026-09-03  THE RULERS ON THE NEW CHECKPOINT, AND A FIGHT-LENGTH GAP  <sub>2026-09</sub>
+- 2026-09-03  `--affliction-penalty` IS HARMFUL, and the mechanism is the ratchet  <sub>2026-09</sub>
+- 2026-09-03  THE POST-RETRAIN SESSION: A MISSING CONTROL, TWO SHUT GATES, AND A RATCHET  <sub>2026-09</sub>
+- 2026-09-03  WHY IT DIED: THE STAY/LEAVE LAYER NEVER SAID NO  <sub>2026-09</sub>
+- 2026-09-03  THE WEIGHTS QUESTION: THE GAME'S RATIO IS NOT A CONSTANT  <sub>2026-09</sub>
+- 2026-09-02  THE PRE-TRAINING AUDIT: THE BRIDGE IS DOWN, AND SGD IS NOT THE BOTTLENECK  <sub>2026-09</sub>
+- 2026-09-02  THE CORRIDOR IS A PLACE NOW, AND THE BANDAGE HAS A JOB  <sub>2026-09</sub>
+- 2026-09-02  THE PARTY IS HANDED PROVISIONS AND THE PLAN WAS BUYING THEM AGAIN  <sub>2026-09</sub>
+- 2026-09-02  PROVISIONS CANNOT BE USED IN BATTLE, AND THE SIMULATOR OFFERED FOUR  <sub>2026-09</sub>
+- 2026-09-02  CAMPING HAD NO FOOD PHASE  <sub>2026-09</sub>
+- 2026-09-02  THE DLC MONSTER TREES WERE NEVER READ  <sub>2026-09</sub>
+- 2026-09-02  TWO MECHANICS THE ENGINE HAD AND THE ENVS COULD NOT REACH  <sub>2026-09</sub>
+- 2026-09-02  FRAN'S VALUE HIERARCHY, AND THE RULER THAT DOES NOT MATCH IT  <sub>2026-09</sub>
+- 2026-09-02  WHY REAL-PLAY STRESS IS HIGHER, AND THE ANSWER I GOT WRONG FIRST  <sub>2026-09</sub>
+- 2026-09-02  AN AFFLICTION COSTS 0.15 IN THE REWARD AND NOTHING IN THE RULER  <sub>2026-09</sub>
+- 2026-09-02  THE REAL-PLAY CORPUS WAS ALREADY ON DISK  <sub>2026-09</sub>
+- 2026-09-02  "EACH HERO PLAYS ITS OWN GAME" IS NOT ABOUT TARGETING  <sub>2026-09</sub>
+- 2026-09-02  THE SNUFF WAS A QUARTER OF A SNUFF, AND THE LOG SAID IT WAS OUT  <sub>2026-09</sub>
+- 2026-09-02  "RANDOMLY USING A INSTEAD OF D" AND "MAPPING IS BUGGED" ARE ONE BUG  <sub>2026-09</sub>
+- 2026-09-02  RESOLVE LEVEL WAS A LEVEL SHORT, IN EVERY COMBAT  <sub>2026-09</sub>
+- 2026-09-02  THE WIKI'S TRAP PAGE AGREES WITH THE FILES ON FOUR NUMBERS  <sub>2026-09</sub>
+- 2026-09-02  WHO STEPS ON THE TRAP, AND WHO OPENS THE CURIO  <sub>2026-09</sub>
+- 2026-09-02  THE RETREAT VALUATION WAS 31x LOW  <sub>2026-09</sub>
+- 2026-09-02  THE EMBARK CHAIN WAS FLOWN, AND THE FRAME FOUND TWO REAL BUGS  <sub>2026-09</sub>
+- 2026-09-02  THE EMBARK CHAIN IS DECIDED OFFLINE  <sub>2026-09</sub>
+- 2026-09-01  THE POST-TUTORIAL PHASE RAN END TO END  <sub>2026-09</sub>
+- 2026-09-01  THE STAGE COACH WORKS, end to end, live  <sub>2026-09</sub>
+- 2026-09-01  The crest opens the upgrade trees, and the derivation was right  <sub>2026-09</sub>
+- 2026-09-01  The curio interaction distance, MEASURED against Fran's own hands  <sub>2026-09</sub>
+- 2026-09-01  RETRACTED: the party was at the ENTRANCE, not the exit  <sub>2026-09</sub>
+- 2026-09-01  RETRACTED: the map panel's box detection was not the bug  <sub>2026-09</sub>
+- 2026-09-01  The tutorial tent: diagnosed, not a key problem  <sub>2026-09</sub>
+- 2026-09-01  The torch layer blocked the route, and it cost a raid  <sub>2026-09</sub>
+- 2026-08-31  The first live town visit, and the three bugs it found  <sub>2026-08</sub>
+- 2026-08-31  The test suite deleted the evidence the loop runs on  <sub>2026-08</sub>
+- 2026-08-31  Three answers from Fran's review, and two of them were bugs  <sub>2026-08</sub>
+- 2026-08-31  The bridge runs itself: reset, drag, the town, and three bugs it found  <sub>2026-08</sub>
+- 2026-08-30  The first REAL dungeon, and three things only a generated map could expose  <sub>2026-08</sub>
+- 2026-08-30  The bridge played a campaign from the title screen, and one flag was why it could not  <sub>2026-08</sub>
+- 2026-08-30  Did it learn to PLAY or to SCORE? Four expert rulers say: some of both  <sub>2026-08</sub>
+- 2026-08-30  The search under-filled the QUIRK slots, which is the trinket bug one axis over  <sub>2026-08</sub>
+- 2026-08-30  Fran's hand-optimisation of four GA comps: three replicate, one does not  <sub>2026-08</sub>
+- 2026-08-30  The Sibyl comp survived a second opinion, and `--model-b` proved it cannot bend the search  <sub>2026-08</sub>
+- 2026-08-30  The abandon exit is correctly priced, and the audit tool was undercounting deaths  <sub>2026-08</sub>
+- 2026-08-29  The PPO hyperparameters had never been tuned, and the learning rate was the one that mattered  <sub>2026-08</sub>
+- 2026-08-27  A modded class loads its KIT now, and the Sibyl is the case that proves it  <sub>2026-08</sub>
+- 2026-08-28  The training reward underprices stress by ~5x against its own ruler  <sub>2026-08</sub>
+- 2026-08-28  Replicating the one-plan finding over five checkpoints, and correcting its headline  <sub>2026-08</sub>
+- 2026-08-28  The slot-equivariant action head: the THIRD null on cross-class transfer  <sub>2026-08</sub>
+- 2026-08-28  The policy has ONE PLAN, and it plays worst where it scores best  <sub>2026-08</sub>
+- 2026-08-28  A comp naming a modded class was scored as a THREE-HERO PARTY  <sub>2026-08</sub>
+- 2026-08-27  The rollout loop was doing everything twice, and the save decoder was quadratic  <sub>2026-08</sub>
+- 2026-08-27  The test suite crashed the machine, and the cause was COLLECTION  <sub>2026-08</sub>
+- 2026-08-27  A test that only fails by RAISING is not a test  <sub>2026-08</sub>
+- 2026-08-27  The Runaway's kit exists now, and the reward can see prevention  <sub>2026-08</sub>
+- 2026-08-26  Sustain is a property of the KIT, and the search could not reach it  <sub>2026-08</sub>
+- 2026-08-26  The one-off trinket rule was a MISREADING, and the Vestal is a convergence artefact  <sub>2026-08</sub>
+- 2026-08-26  Stress weighs 2:1 in the SEARCH, and only in the search  <sub>2026-08</sub>
+- 2026-08-26  Fran's round-2 review: the search built the comp in the wrong ORDER  <sub>2026-08</sub>
+- 2026-08-26  The comp search ranks the OBJECTIVE now, and the scenario probe was measuring the wrong half  <sub>2026-08</sub>
+- 2026-08-25  Where the remaining headroom is: `check_playbook` on the ship candidate  <sub>2026-08</sub>
+- 2026-08-25  The knobs buy robustness and cost deployment — both measured  <sub>2026-08</sub>
+- 2026-08-25  P(death) is null — and so is every refinement of the forecast  <sub>2026-08</sub>
+- 2026-08-25  The five randomisation knobs cost 8.6pp at 3M  <sub>2026-08</sub>
+- 2026-08-25  The threat forecast PAID: +6.2pp and 0.15 fewer deaths on the long band  <sub>2026-08</sub>
+- 2026-08-25  The forecast retrain: used, p=0.0132 — and a small gain nobody can attribute yet  <sub>2026-08</sub>
+- 2026-08-24  The all-comps eval was never reproducible, and `--all-comps` did not fix it  <sub>2026-08</sub>
+- 2026-08-24  The QUALITY ruler: SUCCESS is a gate, not the goal  <sub>2026-08</sub>
+- 2026-08-24  The monster brain's weights are readable without drawing  <sub>2026-08</sub>
+- 2026-08-24  Food was refused in exactly the state that predicts a death  <sub>2026-08</sub>
+- 2026-08-24  Withholding the exit during training is worth +23pp at Champion  <sub>2026-08</sub>
+- 2026-08-24  The end-state objective: deaths fall 5x, and the heal metric finally breaks  <sub>2026-08</sub>
+- 2026-08-24  Districts, and the food nobody could spend  <sub>2026-08</sub>
+- 2026-08-24  Unjustified healing is an OBSERVATION gap, and the reward was right all along  <sub>2026-08</sub>
+- 2026-08-24  Modded classes load, and are shells  <sub>2026-08</sub>
+- 2026-08-24  The boss dose-response: 25% is better than 50%, and the prediction held  <sub>2026-08</sub>
+- 2026-08-24  A boss fight is an ENDURANCE problem, not a recognition problem  <sub>2026-08</sub>
+- 2026-08-24  Training against bosses: no corridor cost, and a weak real gain  <sub>2026-08</sub>
+- 2026-08-24  The slot-permutation probe is INCONCLUSIVE, and for a knowable reason  <sub>2026-08</sub>
+- 2026-08-24  The comp search's scenario had stopped ranking anything  <sub>2026-08</sub>
+- 2026-08-24  Bosses measured for the first time: -28.9pp  <sub>2026-08</sub>
+- 2026-08-24  `--slot-permute`: the one-run probe of why transfer fails  <sub>2026-08</sub>
+- 2026-08-24  The reward fix shows up in BEHAVIOUR, and moved one number the wrong way  <sub>2026-08</sub>
+- 2026-08-24  The retrain, graded three ways: the reward fix did the work  <sub>2026-08</sub>
+- 2026-08-23  The eval stops sampling comps  <sub>2026-08</sub>
+- 2026-08-23  The camping sweep, part 3: a camp buff had no sign and no target  <sub>2026-08</sub>
+- 2026-08-23  The camping sweep, part 2: `.chance` was scored but never rolled  <sub>2026-08</sub>
+- 2026-08-23  The camping sweep, part 1: a mortality debuff was permanent  <sub>2026-08</sub>
+- 2026-08-23  The potential function was being washed out once per combat  <sub>2026-08</sub>
+- 2026-08-23  The capability profile did nothing, and "put identity back" was never available  <sub>2026-08</sub>
+- 2026-08-23  A filed contradiction dissolves: the Flagellant's Rapturous  <sub>2026-08</sub>
+- 2026-08-23  The comp search goes two-stage: structure, then kit  <sub>2026-08</sub>
+- 2026-08-23  The hero capability profile: a falsifier came back NO, and this is the repair  <sub>2026-08</sub>
+- 2026-08-23  The full data sweep: seven more mechanics wired  <sub>2026-08</sub>
+- 2026-08-23  Five effect keys the data ships and nothing read  <sub>2026-08</sub>
+- 2026-08-23  The comp CSV is retired, and four stall keys get read  <sub>2026-08</sub>
+- 2026-08-23  The observation learns mechanics instead of memorising skills  <sub>2026-08</sub>
+-             What the project is  <sub>2026-08</sub>
+-             Hard dependency: local Darkest Dungeon install  <sub>2026-08</sub>
+-             Two-source data model — the central design decision  <sub>2026-08</sub>
+-             Real per-comp skill loadouts (`data/comp_loadout_loader.py`  <sub>2026-08</sub>
+-             Enemy encounter comps (`data/enemy_comp_loader.py`  <sub>2026-08</sub>
+- 2026-08-08  Expedition length was normalised out of the observation  <sub>2026-08</sub>
+- 2026-08-08  Game-trace oracle (`tools/dbwin_capture.py`, `tools/game_trace.py`) — reading the real game's own debug output  <sub>2026-08</sub>
+- 2026-08-08  AoE attacks share ONE to-hit roll — found by the trace oracle  <sub>2026-08</sub>
+- 2026-08-09  The bridge's observation channel is the save files, not the debug log  <sub>2026-08</sub>
+- 2026-08-16  The five dungeon layers get a number for the first time — and the first three attempts at it were flattering  <sub>2026-08</sub>
+- 2026-08-11  The bridge closes: a real fight seeds the simulator, and the policy answers (`bridge/`,  <sub>2026-08</sub>
+- 2026-08-11  The acceptance test found the one defect it existed to find: the advisor was a turn late  <sub>2026-08</sub>
+- 2026-08-12  The save's buff table decodes: DoTs, guard and riposte now transfer (`bridge/seed.py`,  <sub>2026-08</sub>
+- 2026-08-12  Large monsters only answered to their front rank  <sub>2026-08</sub>
+- 2026-08-12  Expedition length is in `persist.map.json` after all, and `content` is not the field to read  <sub>2026-08</sub>
+- 2026-08-12  Making the large-monster fix falsifiable, and a measurement bug found doing it  <sub>2026-08</sub>
+- 2026-08-12  The final-step save is not the checkpoint to evaluate  <sub>2026-08</sub>
+- 2026-08-13  The simulator becomes a valuation, not just a trainer (`bridge/rollout.py`, `town_state.py`, `embark.py`,  <sub>2026-08</sub>
+- 2026-08-12  Acceptance run 5: bleed vs blight was read off the wrong field  <sub>2026-08</sub>
+- 2026-08-09  Buff durations are turn-scoped in the real game, and the debug channel never names a hero skill  <sub>2026-08</sub>
+- 2026-08-09  Overstress personalities came from a convention that contradicted a data file nobody had opened  <sub>2026-08</sub>
+- 2026-08-09  Camping implemented — the long band was measuring a game that doesn't exist  <sub>2026-08</sub>
+- 2026-08-08  The save format decodes (`tools/dson.py`), and damage is quantised earlier than the sim does it  <sub>2026-08</sub>
+- 2026-08-08  The real battle state machine and RNG layering, from the trace oracle  <sub>2026-08</sub>
+- 2026-08-08  Monster formations never closed ranks — the frozen-formation bug  <sub>2026-08</sub>
+- 2026-08-08  Dungeon layout / expedition length (`data/map_gen_loader.py`) — a data source the docs said didn't exist  <sub>2026-08</sub>
+- 2026-08-14  The dungeon map decodes: `persist.map.json` -> a graph (`bridge/dungeon_map.py`,  <sub>2026-08</sub>
+- 2026-08-14  Curio policy — the expert rule as a falsifiable prediction (`bridge/curios.py`, `data/curio_loader.py`,  <sub>2026-08</sub>
+- 2026-08-14  Route policy, and two things the raid save was believed not to contain (`bridge/route.py`,  <sub>2026-08</sub>
+- 2026-08-14  Camping policy, and two timing rules that looked principled and were wrong (`bridge/camp.py`,  <sub>2026-08</sub>
+- 2026-08-14  The reward tests were replaying a different random episode every run (`tests/`,  <sub>2026-08</sub>
+- 2026-08-14  Torch policy — the loot model was in rules.json all along (`bridge/torchlight.py`,  <sub>2026-08</sub>
+- 2026-08-14  Retreat, re-framed: two bills in gold instead of a probability threshold (`bridge/retreat.py`, `data/town_costs.py`,  <sub>2026-08</sub>
+- 2026-08-14  The run loop, and recovering what the player actually did (`bridge/run.py`,  <sub>2026-08</sub>
+- 2026-08-14  The overlay — the advice was in the wrong place (`bridge/overlay.py`,  <sub>2026-08</sub>
+- 2026-08-14  The first live run with the whole loop — four defects  <sub>2026-08</sub>
+- 2026-08-15  A corpse cannot be attacked — an open fidelity gap (found  <sub>2026-08</sub>
+- 2026-08-15  The pre-retrain bundle — three fidelity gaps closed together  <sub>2026-08</sub>
+- 2026-08-15  The 220-round combat: a per-combat budget that was never per-combat  <sub>2026-08</sub>
+- 2026-08-15  The embark advisor against a real campaign  <sub>2026-08</sub>
+- 2026-08-15  Marking which button to press, and a pass that looked like a move  <sub>2026-08</sub>
+- 2026-08-15  Acceptance run 6: the bridge went silent mid-fight, and the magic byte was innocent  <sub>2026-08</sub>
+- 2026-08-15  The marker measured AoEs and corpses wrong, and both inflated DIFFER  <sub>2026-08</sub>
+- 2026-08-15  Retreat becomes an action, and two suspected reward bugs turn out not to be  <sub>2026-08</sub>
+- 2026-08-16  The retreat retrain: what it bought, and the fidelity gap it exposed  <sub>2026-08</sub>
+- 2026-08-15  Acceptance run 7: guard redirects the hit, and the marker did not know  <sub>2026-08</sub>
+- 2026-08-15  The dungeon block told the player the opposite of its own advice  <sub>2026-08</sub>
+- 2026-08-17  Two rulers, opposite verdicts: `tools/agreement.py`  <sub>2026-08</sub>
+- 2026-08-17  The full pack: a discard rule that proposed throwing away the gold  <sub>2026-08</sub>
+- 2026-08-18  Leaving a room: the geometry was in the save all along  <sub>2026-08</sub>
+- 2026-08-18  The save carried a within-area position all along  <sub>2026-08</sub>
+- 2026-08-19  A move is a SWAP, and the rule was exactly inverted  <sub>2026-08</sub>
+- 2026-08-19  Putting the party back in order, and a stall that fired on the first press  <sub>2026-08</sub>
+- 2026-08-19  The position signal was the wrong field, and the right one was one line away  <sub>2026-08</sub>
+- 2026-08-19  The tutorial has no default party order  <sub>2026-08</sub>
+- 2026-08-19  In front of the curio, not on it — and three acknowledgements that were too impatient  <sub>2026-08</sub>
+- 2026-08-19  The curio press: positioning was the wrong theory, twice  <sub>2026-08</sub>
+- 2026-08-19  Every dropped turn says so now  <sub>2026-08</sub>
+- 2026-08-19  Every fight after the first opened with a dropped turn  <sub>2026-08</sub>
+- 2026-08-19  The curio press is now a search with a camera on it  <sub>2026-08</sub>
+- 2026-08-22  The loop is avoided, not solved: GA comps are for playing  <sub>2026-08</sub>
+- 2026-08-22  A comp scored by one policy is a comp that one policy likes  <sub>2026-08</sub>
+- 2026-08-22  The seed-1 replicate: what survived, and what was noise  <sub>2026-08</sub>
+- 2026-08-22  The varied-distribution retrain  <sub>2026-08</sub>
+- 2026-08-22  Round 5: the synergy prior works, and it is the PRIOR that works  <sub>2026-08</sub>
+- 2026-08-22  Round 4: four zones, and what the trinket layer did NOT do  <sub>2026-08</sub>
+- 2026-08-22  One roll, and the resist comes off it — the effect-application shape  <sub>2026-08</sub>
+- 2026-08-22  "Why did it pick Illumination?" — DEBUFF RES, measured for the first time  <sub>2026-08</sub>
+- 2026-08-22  The comp search, rebuilt on Fran's review of its first output  <sub>2026-08</sub>
+- 2026-08-22  The comps get their own folder, and five data bugs fell out of moving them  <sub>2026-08</sub>
+- 2026-08-22  The comp search (`tools/comp_ga.py`,  <sub>2026-08</sub>
+- 2026-08-21  The retrain, measured on all three rulers, and they do not agree  <sub>2026-08</sub>
+- 2026-08-21  Every darkness trinket in the game paid out in broad daylight  <sub>2026-08</sub>
+- 2026-08-21  The game will tell you how its own AI weighted a decision  <sub>2026-08</sub>
+- 2026-08-21  F4's one-off analysis is now an instrument — and it had a soft row  <sub>2026-08</sub>
+- 2026-08-21  A gate is a property of the desire, not of its type  <sub>2026-08</sub>
+- 2026-08-21  The most-equipped buff in the game did nothing  <sub>2026-08</sub>
+- 2026-08-21  Flashbang did not flash: a valueless flag lost to whitespace  <sub>2026-08</sub>
+- 2026-08-21  The Hag fight offered an invulnerable pot as its best target  <sub>2026-08</sub>
+- 2026-08-21  Killing the boss did not end the fight  <sub>2026-08</sub>
+- 2026-08-21  A third of boss fights opened with the boss flat-footed  <sub>2026-08</sub>
+- 2026-08-21  A death cost the survivors nothing, so the death spiral could not happen  <sub>2026-08</sub>
+- 2026-08-21  The party fought the opening round naked, then got healed for it  <sub>2026-08</sub>
+- 2026-08-21  A retreat was a paid skip, and fleeing the last fight paid the completion bonus  <sub>2026-08</sub>
+- 2026-08-21  The dark was never frightening: surprise  <sub>2026-08</sub>
+- 2026-08-21  Nothing could summon, including half the bosses  <sub>2026-08</sub>
+- 2026-08-21  A displacement is a rotation, not a teleport  <sub>2026-08</sub>
+- 2026-08-21  Lunge did nothing, and push went the wrong way  <sub>2026-08</sub>
+- 2026-08-20  Run 2: adding kit and boss randomisation bought nothing measurable  <sub>2026-08</sub>
+- 2026-08-20  Which knob actually matters: the boss, by a distance  <sub>2026-08</sub>
+- 2026-08-20  The distribution fixes are worth +13pp on the CURATED eval only  <sub>2026-08</sub>
+- 2026-08-20  The boss is the last room, or there is no boss  <sub>2026-08</sub>
+- 2026-08-20  The other two thirds of a hero's kit  <sub>2026-08</sub>
+- 2026-08-20  A party is four heroes, not one hero four times  <sub>2026-08</sub>
+- 2026-08-20  Apprentice parties were a full gear rank under-equipped  <sub>2026-08</sub>
+- 2026-08-20  An eighth of every training combat could not happen  <sub>2026-08</sub>
+- 2026-08-20  The retrain: three rulers, and only one of them is measuring what it says  <sub>2026-08</sub>
+- 2026-08-20  A corpse blocks for four rounds, not three  <sub>2026-08</sub>
+- 2026-08-20  Burn, a dead cache digest, and the first comp nobody could train on  <sub>2026-08</sub>
+- 2026-08-20  A stance is not a special case: the Duelist and the Runaway  <sub>2026-08</sub>
+- 2026-08-20  The policy is half as good with an unfamiliar loadout  <sub>2026-08</sub>
+- 2026-08-20  The capture run: the telemetry pays, and the curio theory finally dies  <sub>2026-08</sub>
+- 2026-08-20  The root, sorted  <sub>2026-08</sub>
+- 2026-08-19  The hidden +5 ACC is a roll floor, not an accuracy bonus  <sub>2026-08</sub>
+- 2026-08-19  A fixture that handed back a half-built env  <sub>2026-08</sub>
+- 2026-08-19  The debug log has no gate, and the accuracy ground truth was already on disk  <sub>2026-08</sub>
+- 2026-08-19  Reading the binary: the anchors, before the decompiler  <sub>2026-08</sub>
+- 2026-08-19  The Old Road is a scenario now, not just a test rig  <sub>2026-08</sub>
+- 2026-08-19  The bridge played a dungeon  <sub>2026-08</sub>
+- 2026-08-19  The input was not dropped: the button was greyed out  <sub>2026-08</sub>
+- 2026-08-19  The bridge was spending two core-seconds per recommendation doing nothing  <sub>2026-08</sub>
+- 2026-08-19  The curio: the third position theory, and the first one with a photograph  <sub>2026-08</sub>
+- 2026-08-19  Some inputs really are dropped, and the log could not tell which  <sub>2026-08</sub>
+- 2026-08-19  The ack window was shorter than the game's own write latency  <sub>2026-08</sub>
+- 2026-08-19  A move was marked against the enemy list  <sub>2026-08</sub>
+-             `.darkest` parser (`data/darkest_parser.py`  <sub>2026-08</sub>
+-             Engine architecture (`engine/`  <sub>2026-08</sub>
+-             Torchlight, monster AI, and generic buff resolution (`engine/combat_engine.py`  <sub>2026-08</sub>
+-             Gym env (`env/gym_env.py`  <sub>2026-08</sub>
+- 2026-08-16  Two of three training modes were dead, and nothing said so  <sub>2026-08</sub>
+- 2026-08-16  Performance: the store, the skill scan, and the single env  <sub>2026-08</sub>
+- 2026-08-16  The full-expedition eval was not reproducible, and that is why nothing ever resolved  <sub>2026-08</sub>
+-             Expedition training (`env/expedition_env.py`, `train.py --expedition`, `eval_expedition.py`  <sub>2026-08</sub>
+-             Full-expedition simulation (`env/expedition_sequence_env.py`, `train.py --full-expedition`, `eval_expedition.py --full-expedition`  <sub>2026-08</sub>
+- 2026-08-07  Wiki-driven fidelity fixes, round 2 (`WIKI_MECHANICS.md` extraction,  <sub>2026-08</sub>
+- 2026-08-07  Wiki-driven fidelity fixes, round 3 — the remaining "likely gaps" list, checked and closed  <sub>2026-08</sub>
+-             Known gaps (see `ASSUMPTIONS.md` for full detail  <sub>2026-08</sub>
+-             Design rules (from `AGENTS.md`  <sub>2026-08</sub>
