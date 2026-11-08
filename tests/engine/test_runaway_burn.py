@@ -74,7 +74,13 @@ def test_the_rank_zone_effects_are_parsed():
              if e.controlled_burn_amount}
     assert len(zones) == 5, sorted(zones)
     top = store.effects["RW CB Rank Effect 5"]
-    assert top.controlled_burn_amount == 5
+    # 4, not 5. The ladder in `*.effects.darkest` is 2, 2, 3, 3, 4 -- the
+    # number in the NAME is the rank, not the amount, and this asserted
+    # the two were the same. The game file is ground truth; the test was
+    # wrong from the day it was written.
+    assert top.controlled_burn_amount == 4
+    assert [store.effects[f"RW CB Rank Effect {i}"].controlled_burn_amount
+            for i in range(1, 6)] == [2, 2, 3, 3, 4]
     assert top.controlled_burn_duration == 3
 
 

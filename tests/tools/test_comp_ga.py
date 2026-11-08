@@ -274,13 +274,28 @@ def test_the_rarity_pool_is_read_off_the_corpus_and_excludes_backer_items():
 
 
 def test_a_curated_comp_round_trips_into_a_genome():
-    loadout = store.comp_loadouts["Cross Pack: Blood"]
+    # BY SHAPE, not name: the 2026-09-19 re-export renamed this comp.
+    # Any comp with a duplicated class carrying distinct kits proves the
+    # point, which is that the genome stays positional.
+    import collections
+    loadout = None
+    for _name in sorted(store.comp_loadouts):
+        _lo = store.comp_loadouts[_name]
+        _ids = [h.hero_id for h in _lo.heroes if h.hero_id]
+        _dup = [c for c, n in collections.Counter(_ids).items() if n > 1]
+        if any(len({tuple(h.skill_ids) for h in _lo.heroes
+                    if h.hero_id == c}) > 1 for c in _dup):
+            loadout = _lo
+            break
+    assert loadout is not None, "no duplicate-class comp with distinct kits"
     genome = genome_from_loadout(loadout, store)
     assert [g.hero_class for g in genome] == [h.hero_id for h in loadout.heroes]
     # The duplicate-class comp, kept positional: three distinct Crusaders with
     # genuinely different loadouts, which a hero_id-keyed dict collapses to one.
-    assert [g.hero_class for g in genome].count("crusader") == 3
-    assert len({g.key() for g in genome if g.hero_class == "crusader"}) > 1
+    _dup_class = collections.Counter(
+        g.hero_class for g in genome).most_common(1)[0][0]
+    assert len({g.key() for g in genome
+                if g.hero_class == _dup_class}) > 1
 
 
 # ---------------------------------------------------------------- fitness --
@@ -418,8 +433,13 @@ def test_the_loader_falls_back_to_the_pre_2026_08_22_layout(tmp_path):
     directory, so a wrong path yields an EMPTY store rather than an error."""
     legacy = tmp_path / "metadata" / "COMPS" / "Comps" / "Some Comp"
     legacy.mkdir(parents=True)
-    src = json.loads((Path(CSV_DIR) / "metadata" / "COMPS" / "curated_comps"
-                      / "Curious_Coin__Sand.json").read_text(encoding="utf-8"))
+    # ANY curated comp file: this test is about the legacy DIRECTORY
+    # layout, not about which comp it copies. It named
+    # `Curious_Coin__Sand.json`, which the 2026-09-19 re-export deleted.
+    _curated = sorted((Path(CSV_DIR) / "metadata" / "COMPS"
+                       / "curated_comps").glob("*.json"))
+    assert _curated, "no curated comps at all"
+    src = json.loads(_curated[0].read_text(encoding="utf-8"))
     (legacy / "Some_Comp.json").write_text(json.dumps(src, ensure_ascii=False),
                                            encoding="utf-8")
     paths = CompLoadoutLoader._json_paths(tmp_path)

@@ -71,6 +71,35 @@ user32.GetWindowTextW.restype = ctypes.c_int
 user32.GetForegroundWindow.restype = wt.HWND
 user32.IsIconic.argtypes = [wt.HWND]
 user32.IsIconic.restype = wt.BOOL
+user32.SetWindowPos.argtypes = [wt.HWND, wt.HWND, ctypes.c_int, ctypes.c_int,
+                                ctypes.c_int, ctypes.c_int, wt.UINT]
+user32.SetWindowPos.restype = wt.BOOL
+user32.MonitorFromWindow.argtypes = [wt.HWND, wt.DWORD]
+user32.MonitorFromWindow.restype = wt.HANDLE
+user32.GetSystemMetrics.argtypes = [ctypes.c_int]
+user32.GetSystemMetrics.restype = ctypes.c_int
+
+SWP_NOSIZE = 0x0001
+SWP_NOZORDER = 0x0004
+SWP_NOACTIVATE = 0x0010
+MONITOR_DEFAULTTONEAREST = 0x0002
+SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN = 76, 77
+SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN = 78, 79
+
+
+class _MONITORINFO(ctypes.Structure):
+    _fields_ = [("cbSize", wt.DWORD), ("rcMonitor", wt.RECT),
+                ("rcWork", wt.RECT), ("dwFlags", wt.DWORD)]
+
+
+user32.GetMonitorInfoW.argtypes = [wt.HANDLE, ctypes.POINTER(_MONITORINFO)]
+user32.GetMonitorInfoW.restype = wt.BOOL
+
+# How far to shove a flipped window. Big enough that no rounding or DPI
+# correction can leave it still exactly covering the monitor, small enough
+# that on a two-monitor desktop it stays entirely visible -- which is what
+# keeps every click the actuator then sends on screen.
+FLIP_NUDGE = 300
 
 kernel32.OpenProcess.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
 kernel32.OpenProcess.restype = wt.HANDLE
@@ -328,6 +357,130 @@ def refresh(win: GameWindow) -> Optional[GameWindow]:
                       process=win.process, window=window, client=client)
 
 
+
+def monitor_rect(win: GameWindow) -> Optional[tuple[int, int, int, int]]:
+    """The screen box of the monitor this window mostly sits on."""
+    mon = user32.MonitorFromWindow(win.hwnd, MONITOR_DEFAULTTONEAREST)
+    if not mon:
+        return None
+    info = _MONITORINFO()
+    info.cbSize = ctypes.sizeof(_MONITORINFO)
+    if not user32.GetMonitorInfoW(mon, ctypes.byref(info)):
+        return None
+    r = info.rcMonitor
+    return (r.left, r.top, r.right, r.bottom)
+
+
+def virtual_screen() -> tuple[int, int, int, int]:
+    """The box every monitor together covers, in screen coordinates."""
+    x = user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
+    y = user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
+    return (x, y,
+            x + user32.GetSystemMetrics(SM_CXVIRTUALSCREEN),
+            y + user32.GetSystemMetrics(SM_CYVIRTUALSCREEN))
+
+
+def covers_a_monitor(win: GameWindow) -> bool:
+    """True when the window box is EXACTLY one monitor's box.
+
+    That is the condition for DWM's independent-flip path, which is what makes
+    `screen.grab` return a pure black frame while the game is visibly running
+    -- see `screen.display_is_live`. It is an exact test on purpose: a window
+    one pixel smaller than the monitor is composited normally and reads fine.
+    """
+    mon = monitor_rect(win)
+    return mon is not None and tuple(win.window) == mon
+
+
+def move_to(win: GameWindow, x: int, y: int) -> Optional[GameWindow]:
+    """Move the window, keeping its size, and return the re-read rects."""
+    if not user32.SetWindowPos(win.hwnd, 0, int(x), int(y), 0, 0,
+                               SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE):
+        return None
+    return refresh(win)
+
+
+def nudge_target(window: tuple[int, int, int, int],
+                 monitor: tuple[int, int, int, int],
+                 virtual: tuple[int, int, int, int],
+                 by: int = FLIP_NUDGE) -> tuple[tuple[int, int], bool]:
+    """Where to put a flipped window: `((x, y), clipped)`.
+
+    Split out from `nudge_off_monitor` so the choice can be tested without a
+    window manager -- it is the only part of the repair with a decision in it.
+
+    In preference order, and the first two are the only ones that keep the
+    whole window on the virtual desktop. The 1-px fallbacks exist for a
+    single-monitor machine, where nothing can both clear the monitor and stay
+    wholly inside it; clipping one pixel is the cheapest way to lose the flip
+    path, and it costs one pixel of a frame that is currently costing all of
+    them. `clipped` says which of the two happened, because the caller has to
+    tell the operator.
+    """
+    wl, wt_, wr, wb = window
+    w, h = wr - wl, wb - wt_
+    vl, vt, vr, vb = virtual
+    candidates = [(wl + by, wt_), (wl - by, wt_),
+                  (wl, wt_ + by), (wl, wt_ - by),
+                  (wl + 1, wt_), (wl - 1, wt_)]
+    def overhang(pos: tuple[int, int]) -> int:
+        x, y = pos
+        return (max(0, vl - x) + max(0, vt - y)
+                + max(0, x + w - vr) + max(0, y + h - vb))
+
+    inside = [c for c in candidates if overhang(c) == 0]
+    if inside:
+        return inside[0], False
+    # NOTHING fits, which is the single-monitor case: the window is exactly
+    # the desktop, so every offset hangs off it. Take the SMALLEST overhang
+    # rather than the first candidate -- the preference order is about which
+    # nudge is nicest when they all fit, and it puts the 300 px one first,
+    # which here would throw away 300 px of frame to save one.
+    return min(candidates, key=overhang), True
+
+
+def nudge_off_monitor(win: GameWindow, by: int = FLIP_NUDGE
+                      ) -> tuple[Optional[GameWindow], str]:
+    """Shove a flip-path window sideways so GDI can read it again.
+
+    **This turns the one fault that ended a whole unattended night into a
+    two-line recovery.** A borderless window covering exactly one monitor is
+    scanned out directly by DWM, so every capture comes back pure black and
+    every pixel layer -- screen recogniser, map panel, action bar -- is blind
+    while the game itself is running perfectly. Measured on this machine
+    2026-09-20: window (0,0,1920,1080) on a 3840x1080 desktop captured mean
+    brightness **0.0**; moved to x=300 the same frame read **11.1** and the
+    recogniser named `title`.
+
+    The size is deliberately not touched. It is the game's own Video option,
+    the render target is sized from it, and `-size` is accepted and ignored --
+    so resizing the window from outside asks the game a question it was never
+    asked at launch. Moving asks it nothing.
+
+    Returns `(window, why)`. `window` is None when there was nothing to do or
+    the move failed, and `why` always says which.
+    """
+    mon = monitor_rect(win)
+    if mon is None:
+        return None, "cannot tell which monitor the window is on"
+    if tuple(win.window) != mon:
+        return None, "the window does not cover a monitor, so this is not the flip case"
+    was = tuple(win.window)
+    (x, y), clipped = nudge_target(was, mon, virtual_screen(), by)
+    moved = move_to(win, x, y)
+    if moved is None:
+        return None, f"the move to {x},{y} was refused by the window manager"
+    if tuple(moved.window) == mon:
+        return None, "the window snapped straight back onto the monitor"
+    note = (f"moved the window from {was[0]},{was[1]} to {x},{y} so it no longer "
+            f"covers the monitor {mon}")
+    if clipped:
+        note += (" - NOTE it now hangs off the virtual desktop, so the frame "
+                 "is clipped; set a smaller resolution in the game's Video "
+                 "options for a clean capture")
+    return moved, note
+
+
 def describe(win: GameWindow) -> str:
     w, h = win.client_size
     wl, wt_, wr, wb = win.window
@@ -341,6 +494,59 @@ def describe(win: GameWindow) -> str:
             f"  foreground  {win.is_foreground}   minimised {win.is_minimised}")
 
 
+
+# -- keeping the display awake ------------------------------------------------
+#
+# **A SLEEPING MONITOR IS INVISIBLE TO EVERY CHECK THE BRIDGE HAS** and it cost
+# a whole unattended night on 2026-09-21. The game kept running perfectly --
+# 16.9% of the GPU's 3D engine, a live `title` screen, PlayFab pinging on
+# schedule -- and every `screen.grab` came back pure black, because a window's
+# frames stop reaching the surface GDI reads once the display powers down. The
+# DESKTOP still read fine, since its last composition is cached, so the usual
+# "is anything drawing?" control says yes while the game says no. Four
+# iterations were refused, the run was scored `no-game`, and the machine was
+# fine the whole time. Fran's one-line fix was "I've moved the mouse to wake up
+# the monitor".
+#
+# `SetThreadExecutionState` is the supported way to say "I am running an
+# unattended job, do not power the display down". It is per-THREAD and lasts
+# only as long as the process, which is exactly the scope wanted: it changes
+# nothing about Fran's power plan and needs no elevation.
+
+ES_CONTINUOUS = 0x80000000
+ES_SYSTEM_REQUIRED = 0x00000001
+ES_DISPLAY_REQUIRED = 0x00000002
+
+
+def keep_display_awake(on: bool = True) -> bool:
+    """Ask Windows not to sleep the display (or release the request).
+
+    Returns True when the request was accepted. It does NOT wake a display
+    that is already off -- see `wake_display` -- so assert it at the START of
+    an unattended run, while somebody is still there to see it begin.
+    """
+    flags = ES_CONTINUOUS | (ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED if on
+                             else 0)
+    return bool(kernel32.SetThreadExecutionState(ctypes.c_uint(flags)))
+
+
+def wake_display() -> bool:
+    """Try to wake a display that has already powered down.
+
+    Asserting `ES_DISPLAY_REQUIRED` alone does not do it, so this also sends a
+    zero-distance mouse move, which is what a human does by touching the mouse.
+    It is deliberately the smallest possible input: the cursor does not move,
+    so it cannot disturb a hover the recogniser depends on
+    (`park_cursor` exists because a stray tooltip cost two nights).
+    """
+    ok = keep_display_awake(True)
+    try:
+        user32.mouse_event(0x0001, 0, 0, 0, 0)          # MOUSEEVENTF_MOVE, 0px
+    except Exception:                                    # noqa: BLE001
+        return ok
+    return ok
+
+
 def main(argv=None) -> int:
     import argparse
     import time
@@ -351,6 +557,9 @@ def main(argv=None) -> int:
     ap.add_argument("--list", action="store_true", help="every visible window")
     ap.add_argument("--watch", type=float, default=0.0,
                     help="re-poll for N seconds; move/resize the window to check tracking")
+    ap.add_argument("--nudge", action="store_true",
+                    help="if the window exactly covers a monitor, shove it "
+                         "sideways so GDI can capture it again")
     args = ap.parse_args(argv)
 
     if args.list:
@@ -366,6 +575,16 @@ def main(argv=None) -> int:
         print("Tip: `python bridge/window.py --list` shows every visible window.")
         return 1
     print(describe(win))
+    print(f"  covers a monitor  {covers_a_monitor(win)}"
+          f"   (that is the pure-black capture case)")
+
+    if args.nudge:
+        moved, why = nudge_off_monitor(win)
+        print()
+        print(f"  nudge: {why}")
+        if moved is not None:
+            win = moved
+            print(describe(win))
 
     if args.watch:
         print(f"\nwatching {args.watch:.0f}s - move or resize the window...")

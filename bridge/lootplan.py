@@ -163,14 +163,21 @@ class Option:
 
 
 def _loot_of(results, difficulty: int, dungeon: str, game_dir: str) -> LootValue:
-    """Price one outcome's concrete results, weighted as the table weights them."""
+    """Price one LOOT outcome: every result is drawn, `weight` times.
+
+    **In a Loot row the number after each table is a DRAW COUNT, not a
+    weight** -- `curio_type_library.csv` labels the column `<- # Draws` on
+    every Loot row that has one (84 of 87), and a Loot row has no percentage
+    per result. A bare-handed `locked_strongbox` is `A` twice and the key
+    makes it three times; `discarded_pack` is `S` once AND `B` twice AND a
+    journal page. Until 2026-10-11 this normalised the counts as weights, so
+    every curio paid ONE draw: Fran's own raids (recorder, profile_1) took
+    ~280 gold per curio investigated against the ~80 this priced."""
     tables = load_loot_tables(game_dir)
-    total = sum(r.weight for r in results) or float(len(results) or 1)
     out = LootValue()
     for result in results:
-        share = (result.weight / total) if total else 0.0
-        out = out + share * tables.expected(result.name, difficulty, dungeon,
-                                            game_dir)
+        out = out + max(0.0, result.weight) * tables.expected(result.name, difficulty,
+                                                              dungeon, game_dir)
     return out
 
 
@@ -222,6 +229,25 @@ def curio_options(curio_id: str, difficulty: int = 0, dungeon: str = "",
 #: for the dark at all if every one of its outcomes draws loot, which is a
 #: structural fact about the curio rather than a threshold.
 #:
+#: Does the party WALK back through the dungeon before leaving?
+#:
+#: **Yes, and the deferral is not really about the dark bonus.** Fran,
+#: 2026-09-21: *"deferring a loot curio can be useful to maintain torches to
+#: have a safe number of torches for the dungeon, but when you beat the
+#: dungeon or cases like one way exits you should snuff torch to max loot
+#: value when backtracking."* So a deferral BUYS A TORCH -- the curio is
+#: opened later in the dark instead of light being held for it -- and the
+#: backtrack is what collects it.
+#:
+#: It was briefly set False on the reasoning that `act.plan_leave_raid` now
+#: ends a raid from wherever the party stands, so nothing is ever re-entered.
+#: That is true of the EXIT and false of the plan: the party still walks the
+#: dungeon after the objective is met, and the seal is pressed at the END of
+#: that walk, not instead of it. What must hold is that the backtrack
+#: actually happens and is snuffed -- see `run.Layers._raid_end`, which keeps
+#: the party in the dungeon while a deferred curio is outstanding.
+WALKS_HOME = True
+
 #: Falsifier: a curio this refuses to defer, opened twice at torch 100 and at
 #: torch 0, whose extra yield is plainly worth more than the heal or the
 #: provisions it would have handed over earlier in the run.
@@ -597,7 +623,31 @@ def plan_loot(dungeon: DungeonMap, quest: Optional[Quest] = None,
     # The area the walk home STARTS in is not revisited, so anything standing
     # there has to be resolved in place. Deferring it drops it silently, which
     # is what the first run of this did to the Old Road's trapped chest.
-    revisited = set(homeward[1:])
+    # **THE PARTY NO LONGER WALKS HOME, so nothing is deferred for free.**
+    # Every deferral in this module rests on one premise, stated in the
+    # docstring: *"the party has to walk back to the entrance to hand a
+    # completed quest in, so those corridors are re-entered whether or not
+    # anything was deferred."* That stopped being true on 2026-09-21, when
+    # the raid exit became the quest banner's red seal -- `plan_leave_raid`
+    # ends the raid from wherever the party is standing, and there is no walk
+    # back at all.
+    #
+    # So a deferral is now a forfeit, and it was one live the same night:
+    # `DEFER locked_strongbox - worth more at torch 0 and the way home comes
+    # back through rooA`, and then the raid ended in rooF with 880 gold and
+    # six heirlooms still on the map. Fran: *"several chests were skipped
+    # even with skeleton key"* -- they were not skipped, they were promised
+    # and then abandoned, which the docstring already names as the one thing
+    # a deferral must never do.
+    #
+    # An empty `revisited` is exactly "nothing can be deferred": every
+    # positive curio becomes a TAKE on the outbound pass. That is worth less
+    # per curio than opening it dark on a walk home, and a curio opened lit
+    # is worth incomparably more than one left in the dungeon.
+    #
+    # Set this True again the day the bridge walks home -- the machinery is
+    # untouched and correct, it is the premise that moved.
+    revisited = set(homeward[1:]) if WALKS_HOME else set()
 
     outbound_areas = list(dict.fromkeys(outbound))
     battle_at = {e.area for e in events if e.kind == "battle"}
@@ -617,6 +667,26 @@ def plan_loot(dungeon: DungeonMap, quest: Optional[Quest] = None,
     # dark, and a deferral here would only manufacture the revisit that
     # justifies it.
     if not battle_at:
+        before_snuff = []
+    # **AND THE PARTY MAY BE DARK ALREADY.** The two cuts above both ask
+    # where the planned snuff falls; neither asks what the torch reads NOW.
+    # Walk in at 0 -- which is exactly where a fight leaves you, since the
+    # snuff lands before the killing blow -- and every curio ahead is already
+    # going to be opened dark, so deferring one buys nothing and only risks
+    # losing it. Fran, 2026-09-21: *"if it's already a 0 torch there is also
+    # not a use on deferring that as well as you won't increase that value
+    # later, this covers cases like combat with chest rooms for example."*
+    #
+    # Narrow on purpose: it fires only when the light is out AND the plan
+    # never turns it back on. A relight ahead means the curio after it WOULD
+    # be opened lit, and then a deferral is worth a torch again -- which is
+    # the whole reason `WALKS_HOME` is True.
+    # A relight is only ever planned to clear the floor for a FIGHT, and only
+    # if the pack can pay for it -- so "no fight ahead, or no torch to spend"
+    # is exactly "the light is not coming back". Both are already in hand
+    # here; the relight stops themselves are emitted further down.
+    if torch <= SHUTDOWN_LEVEL and (
+            not battle_at or int(inventory.get("torch", 0) or 0) <= 0):
         before_snuff = []
 
     # 2. Which curios can be deferred for FREE -- see the module docstring.
@@ -668,10 +738,16 @@ def plan_loot(dungeon: DungeonMap, quest: Optional[Quest] = None,
     level = float(torch)
     snuffed = False
 
-    def burn(area_id: str) -> None:
+    def burn(area_id: str, tiles: Optional[int] = None,
+             revisit: Optional[bool] = None) -> None:
+        """Charge `tiles` of `area_id` (all of it by default). A corridor
+        walked before costs the cleared-tile rate -- see `walk_costs`."""
         nonlocal level
-        loss = walk_costs(level, game_dir).light_loss
-        level = max(SHUTDOWN_LEVEL, level - loss * _tiles(dungeon, area_id))
+        costs = walk_costs(level, game_dir)
+        again = (area_id in seen_areas) if revisit is None else revisit
+        loss = costs.revisit_light_loss if again else costs.light_loss
+        count = _tiles(dungeon, area_id) if tiles is None else tiles
+        level = max(SHUTDOWN_LEVEL, level - loss * count)
 
     seen_areas = set(outbound[:1 + len(corridor_prefix)])
     relit_again = dark_again = 0
@@ -730,8 +806,16 @@ def plan_loot(dungeon: DungeonMap, quest: Optional[Quest] = None,
         level = SHUTDOWN_LEVEL
 
     for index, area in enumerate(outbound):
+        # **A corridor is charged TILE BY TILE as it is walked**, not all on
+        # entry: a fight at tile 2 is fought after three tiles, not the whole
+        # corridor. At the real 6 per new tile the difference is the first
+        # fight's light bracket (2026-09-23).
+        progressive = bool(index) and area in dungeon.corridors
+        revisit_here = area in seen_areas
+        walked_here = 0
         if index:
-            burn(area)
+            if not progressive:
+                burn(area, revisit=revisit_here)
             note_entry(area)
             stops.append(Stop(area=area, action="walk", torch=level))
         here_events = [e for e in events
@@ -760,6 +844,31 @@ def plan_loot(dungeon: DungeonMap, quest: Optional[Quest] = None,
                                       f"{len(ahead)} fight(s) still ahead and "
                                       f"the light was about to cost 6 a tile"))
         for event in sorted(here_events, key=lambda e: (e.tile, e.kind)):
+            if progressive:
+                step = min(_tiles(dungeon, area), event.tile + 1) - walked_here
+                if step > 0:
+                    burn(area, tiles=step, revisit=revisit_here)
+                    walked_here += step
+                # **Relight at the fight too, not only on arrival.** Charged
+                # tile by tile, a corridor that starts bright can drop under
+                # the floor before a fight at tile 4 -- and a torch left in
+                # the pack while the fight goes dark is the one outcome the
+                # floor exists to prevent (PLAYBOOK 7.2: max light when able).
+                if (event.kind == "battle" and not snuffed
+                        and level < torch_floor and torches
+                        and event.key not in done):
+                    need = 0
+                    while (level + need * TORCH_RESTORE < torch_floor
+                           and need < torches):
+                        need += 1
+                    if level + need * TORCH_RESTORE >= torch_floor:
+                        torches -= need
+                        spent += need
+                        level = min(100.0, level + need * TORCH_RESTORE)
+                        stops.append(Stop(area=area, action="relight",
+                                          tile=event.tile, torch=level,
+                                          why=f"{need} torch(es) before the "
+                                              f"fight at tile {event.tile}"))
             # A DEFER is not a resolution -- marking it done here is what made
             # the walk home skip everything it had gone back for.
             if event.key not in deferred:
@@ -807,6 +916,9 @@ def plan_loot(dungeon: DungeonMap, quest: Optional[Quest] = None,
             stops.append(Stop(area=area, action="take", tile=event.tile,
                               torch=level, item=item or "", value=gain,
                               curio_id=event.curio_id, why=option.why))
+        if progressive and walked_here < _tiles(dungeon, area):
+            burn(area, tiles=_tiles(dungeon, area) - walked_here,
+                 revisit=revisit_here)
 
     # 5. Home, in the dark, collecting what was deferred.
     if not snuffed and deferred:

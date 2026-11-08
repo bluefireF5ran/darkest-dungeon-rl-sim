@@ -311,6 +311,10 @@ def main() -> int:
     ap.add_argument("--probe", action="store_true",
                     help="go/no-go: report which known combat-debug patterns actually fired")
     ap.add_argument("--quiet", action="store_true", help="suppress per-line echo")
+    ap.add_argument("--stamp", action="store_true",
+                    help="prefix each --out line with '@<unix time> ', the clock "
+                         "bridge/recorder.py stamps its events with, so a trace "
+                         "can be paired with the saves of the same session")
     args = ap.parse_args()
 
     if sys.platform != "win32":
@@ -378,6 +382,8 @@ def main() -> int:
                 if not args.quiet:
                     print(line, flush=True)
                 if out:
+                    if args.stamp:
+                        line = f"@{time.time():.3f} {line}"
                     out.write(line + "\n")
                     out.flush()
     except KeyboardInterrupt:

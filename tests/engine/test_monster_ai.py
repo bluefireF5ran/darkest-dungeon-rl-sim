@@ -39,18 +39,35 @@ def test_monster_brains_resolve_for_all_enemies():
 
 def test_cultist_brawler_uses_both_skills_not_just_first():
     """Regression test: _execute_enemy_turn used to always use ed.skills[0]
-    only — cultist_brawler_A's second skill (brawler_claw_weak) was never
-    reachable at all."""
+    only -- cultist_brawler_A's second skill (brawler_claw_weak) was never
+    reachable at all.
+
+    Rewritten 2026-09-19 when enemy `.launch` began to be enforced. The old
+    form put a lone brawler in rank 1 and asserted BOTH claws came up, which
+    the game forbids: `brawler_claw` is `.launch 21` and `brawler_claw_weak`
+    is `.launch 43`, disjoint sets, so no single rank offers both. That
+    assertion only ever passed because the launch filter was missing. Testing
+    each skill at a rank where it is legal proves the original point -- a
+    skill past `skills[0]` is reachable -- and now pins the launch split too."""
     engine = _fresh_engine()
     ed = engine._get_enemy_def(engine.enemies[0].id)
     brain = engine._get_monster_brain(ed)
-    seen = set()
-    for seed in range(100):
-        engine.rng = SeededRNG(seed)
-        skill_id, _ = engine._select_enemy_skill(engine.enemies[0], ed, brain)
-        seen.add(skill_id)
-    assert seen == {"brawler_claw", "brawler_claw_weak"}, seen
-    print(f"  PASS test_cultist_brawler_uses_both_skills_not_just_first ({seen})")
+
+    def seen_at(position):
+        engine.enemies[0].position = position
+        out = set()
+        for seed in range(100):
+            engine.rng = SeededRNG(seed)
+            skill_id, _ = engine._select_enemy_skill(engine.enemies[0], ed, brain)
+            out.add(skill_id)
+        return out
+
+    front = seen_at(0)                       # rank 1 -- only .launch 21 fits
+    assert front == {"brawler_claw"}, front
+    back = seen_at(2)                        # rank 3 -- only .launch 43 fits
+    assert back == {"brawler_claw_weak"}, back
+    print(f"  PASS test_cultist_brawler_uses_both_skills_not_just_first "
+          f"(rank1={front}, rank3={back})")
 
 
 def test_marked_target_is_preferred_for_gated_skill():
@@ -180,6 +197,98 @@ def test_monster_skill_cooldown_enforced_and_ticks_down():
 
     assert used_skill not in enemy.skill_cooldowns, "cooldown should have expired after 2 ticks"
     print(f"  PASS test_monster_skill_cooldown_enforced_and_ticks_down ({used_skill})")
+
+
+def test_enemy_skills_respect_launch_ranks():
+    """`.launch` restricts the rank a MONSTER may act from, and the enemy
+    side ignored it until 2026-09-19 -- `engine/action.py` had enforced the
+    same field for heroes all along.
+
+    The Bone Courtier is the clean case the community guides name: its
+    stress attack `tempting_goblet` is `.launch 432`, so shoving it into
+    rank 1 must leave it nothing but `dagger_jab`. Before the fix it fired
+    the goblet in 106 of 200 draws, which made disruption -- moving a stress
+    caster out of its firing rank -- a no-op in the simulator."""
+    engine = CombatEngine(store, SeededRNG(1))
+    crusader = store.heroes["crusader"]
+    courtier = store.enemies["skeleton_courtier_A"]
+    engine.reset(hero_defs=[crusader, crusader], enemy_defs=[courtier],
+                 hero_positions=[1, 2])
+    enemy = engine.enemies[0]
+    ed = engine._get_enemy_def(enemy.id)
+    brain = engine._get_monster_brain(ed)
+    assert enemy.position == 0, "the lone courtier should stand in rank 1"
+
+    seen = set()
+    for seed in range(200):
+        engine.rng = SeededRNG(seed)
+        skill_id, _ = engine._select_enemy_skill(enemy, ed, brain)
+        seen.add(skill_id)
+    assert seen == {"dagger_jab"}, f"launch 432 must bar rank 1, got {seen}"
+    print(f"  PASS test_enemy_skills_respect_launch_ranks ({seen})")
+
+
+def test_launch_restricted_skill_returns_when_rank_allows_it():
+    """The other direction, so the filter can't pass by blocking everything:
+    the same skill must come back once the Courtier is out of rank 1."""
+    engine = CombatEngine(store, SeededRNG(1))
+    crusader = store.heroes["crusader"]
+    courtier = store.enemies["skeleton_courtier_A"]
+    # A size-1 filler ahead of it puts the courtier in rank 2, inside .launch.
+    filler = store.enemies["cultist_brawler_A"]
+    engine.reset(hero_defs=[crusader, crusader], enemy_defs=[filler, courtier],
+                 hero_positions=[1, 2])
+    enemy = next(e for e in engine.enemies
+                 if engine._get_enemy_def(e.id).id == "skeleton_courtier_A")
+    assert enemy.position == 1, f"expected rank 2, got {enemy.position + 1}"
+    ed = engine._get_enemy_def(enemy.id)
+    brain = engine._get_monster_brain(ed)
+
+    seen = set()
+    for seed in range(200):
+        engine.rng = SeededRNG(seed)
+        skill_id, _ = engine._select_enemy_skill(enemy, ed, brain)
+        seen.add(skill_id)
+    assert "tempting_goblet" in seen, f"rank 2 is in .launch 432, got {seen}"
+    print(f"  PASS test_launch_restricted_skill_returns_when_rank_allows_it ({seen})")
+
+
+def test_launch_filter_covers_multi_rank_monsters():
+    """A size>1 monster passes if ANY rank it occupies is in `.launch`, the
+    same way `.target` resolves against its whole footprint.
+
+    Two halves, because each catches a different wrong implementation:
+
+    * The Swinetaur (size 2) sits in ranks 1-2 and its two real attacks,
+      `pig_spear` and `bull_rush`, are `.launch 34`. At the front it is left
+      with `backhand` and `trot_retreat` -- this is the "size-2 enemies are
+      free stalling material" the community guides describe, and it only
+      works if the filter runs at all.
+    * The big adder keeps `molt` (`.launch 23`) at the very same placement,
+      because its REAR rank is 2. A naive `position + 1 in launch` test --
+      the hero-side shape, where size is always 1 -- would wrongly bar it."""
+    crusader = store.heroes["crusader"]
+
+    def usable_at_front(enemy_id):
+        engine = CombatEngine(store, SeededRNG(1))
+        ed = store.enemies[enemy_id]
+        engine.reset(hero_defs=[crusader, crusader], enemy_defs=[ed],
+                     hero_positions=[1, 2])
+        enemy = engine.enemies[0]
+        assert enemy.position == 0, f"{enemy_id} should be front-most"
+        assert enemy.occupied_positions == [0, 1], enemy.occupied_positions
+        brain = engine._get_monster_brain(ed)
+        usable, _ = engine._enemy_skill_weights(enemy, ed, brain)
+        return {sk_id for sk_id, _ in (usable or [])}
+
+    swine = usable_at_front("swinetaur_A")
+    assert not {"pig_spear", "bull_rush"} & swine,         f"launch 34 must bar ranks 1-2, got {swine}"
+    assert "backhand" in swine, f"launch 1 must survive at the front, got {swine}"
+
+    adder = usable_at_front("snake_big_adder_A")
+    assert "molt" in adder,         f"launch 23 overlaps the rear rank of a size-2 monster, got {adder}"
+    print(f"  PASS test_launch_filter_covers_multi_rank_monsters "
+          f"(swinetaur={sorted(swine)}, adder={sorted(adder)})")
 
 
 if __name__ == "__main__":

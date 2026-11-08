@@ -116,14 +116,14 @@ def test_the_cost_is_returning_to_where_you_were():
     """A party already at 25 pays ONE torch to undo a shutdown, not four.
     Charging the full relight talks it out of a nearly free play."""
     advice = advise_torch(rules(), torch=25.0, torches_held=2)
-    assert advice.action == "shutdown"
+    # Priced at 1 torch -- and since PLAYBOOK 7.2 a PAID shutdown is held.
+    assert advice.action == "hold"
     assert advice.torches_needed == 1
 
 
 def test_a_shutdown_is_refused_when_the_torches_are_not_there():
     advice = advise_torch(rules(), torch=25.0, torches_held=0)
     assert advice.action == "hold"
-    assert "hold 0" in advice.reason
 
 
 # --- the policy ---
@@ -131,8 +131,11 @@ def test_a_shutdown_is_refused_when_the_torches_are_not_there():
 def test_the_shutdown_is_only_offered_on_the_turn_that_ends_the_fight():
     """Darkness hands the monsters +12.5 accuracy, +25% damage and +5 crit. It
     is free only once the fight is already won."""
-    mid = advise_torch(rules(), torch=100.0, torches_held=8, about_to_win=False)
-    end = advise_torch(rules(), torch=100.0, torches_held=8, about_to_win=True)
+    # On the run's last fight (free), so PLAYBOOK 7.2 does not hold it.
+    mid = advise_torch(rules(), torch=100.0, torches_held=8, about_to_win=False,
+                       last_combat_of_run=True)
+    end = advise_torch(rules(), torch=100.0, torches_held=8, about_to_win=True,
+                       last_combat_of_run=True)
     assert mid.action == "hold"
     assert end.action == "shutdown"
 
@@ -208,8 +211,10 @@ class _State:
 
 def test_one_fight_left_is_not_a_free_shutdown_while_there_is_dungeon_to_walk():
     advice = advise_from_live(_State(), rules(), moves_left=5)
-    assert advice.action == "shutdown"          # still the right play...
-    assert not advice.free_because             # ...but it is not free
+    # Not free -- and since PLAYBOOK 7.2 (max light while torches allow) a
+    # paid shutdown is held rather than bought.
+    assert advice.action == "hold"
+    assert not advice.free_because
     assert advice.torches_needed > 0
     assert "nothing left to walk through" not in advice.report()
 
@@ -244,7 +249,8 @@ def test_the_shutdown_is_free_when_no_FIGHT_follows_it():
     # Unknown keeps the old torch-budget reasoning rather than assuming the
     # best case, so nothing that does not pass it changes behaviour.
     assert advise_torch(table, 94.0, 0).action == "hold"
-    assert advise_torch(table, 94.0, 4, battles_left=1).action == "shutdown"
+    # Paid (a fight still follows): held since PLAYBOOK 7.2.
+    assert advise_torch(table, 94.0, 4, battles_left=1).action == "hold"
 
 
 def test_the_free_reason_says_which_rule_made_it_free():

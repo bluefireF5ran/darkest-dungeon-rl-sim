@@ -1,0 +1,1689 @@
+{
+ "source": "captures/trinket_tiers/tier_list_<n>.png, matched by tools/trinket_tierlist.py",
+ "entries": {
+  "accuracy_stone": {
+   "sheet": "very_common",
+   "rarity": "very_common",
+   "tier": "better than an empty slot",
+   "rank": 3,
+   "of": 5,
+   "torchless": false,
+   "score": 0.977
+  },
+  "agile_talon": {
+   "sheet": "common",
+   "rarity": "common",
+   "tier": "yippie",
+   "rank": 1,
+   "of": 5,
+   "torchless": false,
+   "score": 0.936
+  },
+  "agility_whistle": {
+   "sheet": "common",
+   "rarity": "common",
+   "tier": "yippie",
+   "rank": 1,
+   "of": 5,
+   "torchless": false,
+   "score": 0.959
+  },
+  "antiq_1": {
+   "sheet": "common",
+   "rarity": "common",
+   "tier": "actually really good, might get value later on in game even",
+   "rank": 0,
+   "of": 5,
+   "torchless": false,
+   "score": 0.973
+  },
+  "antiq_2": {
+   "sheet": "uncommon",
+   "rarity": "uncommon",
+   "tier": "yucky",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.949
+  },
+  "antiq_3": {
+   "sheet": "uncommon",
+   "rarity": "uncommon",
+   "tier": "decent",
+   "rank": 2,
+   "of": 5,
+   "torchless": false,
+   "score": 0.965
+  },
+  "antiq_4": {
+   "sheet": "rare",
+   "rarity": "rare",
+   "tier": "pretty good",
+   "rank": 1,
+   "of": 5,
+   "torchless": false,
+   "score": 0.931
+  },
+  "antiq_5": {
+   "sheet": "very_rare",
+   "rarity": "very_rare",
+   "tier": "niche",
+   "rank": 3,
+   "of": 5,
+   "torchless": false,
+   "score": 0.932
+  },
+  "archers_ring": {
+   "sheet": "common",
+   "rarity": "common",
+   "tier": "use it once, toss away later",
+   "rank": 3,
+   "of": 5,
+   "torchless": false,
+   "score": 0.958
+  },
+  "beast_slayers_ring": {
+   "sheet": "rare",
+   "rarity": "rare",
+   "tier": "just sell",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.925
+  },
+  "berserk_charm": {
+   "sheet": "rare",
+   "rarity": "rare",
+   "tier": "just sell",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.958
+  },
+  "berserk_mask": {
+   "sheet": "very_rare",
+   "rarity": "very_rare",
+   "tier": "sell / keep just to remove from pool",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.961
+  },
+  "blasphemous_vial": {
+   "sheet": "very_rare",
+   "rarity": "very_rare",
+   "tier": "insane",
+   "rank": 0,
+   "of": 5,
+   "torchless": false,
+   "score": 0.984
+  },
+  "bleed_amulet": {
+   "sheet": "uncommon",
+   "rarity": "uncommon",
+   "tier": "very solid",
+   "rank": 1,
+   "of": 5,
+   "torchless": false,
+   "score": 0.982
+  },
+  "bleed_charm": {
+   "sheet": "very_common",
+   "rarity": "very_common",
+   "tier": "has actual use cases",
+   "rank": 1,
+   "of": 5,
+   "torchless": false,
+   "score": 0.983
+  },
+  "bleed_stone": {
+   "sheet": "very_common",
+   "rarity": "very_common",
+   "tier": "niche but still useful sometimes",
+   "rank": 2,
+   "of": 5,
+   "torchless": false,
+   "score": 0.954
+  },
+  "bleeding_pendant": {
+   "sheet": "common",
+   "rarity": "common",
+   "tier": "wouldn't be crazy to run it a couple times",
+   "rank": 2,
+   "of": 5,
+   "torchless": false,
+   "score": 0.939
+  },
+  "blight_amulet": {
+   "sheet": "uncommon",
+   "rarity": "uncommon",
+   "tier": "yucky",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.931
+  },
+  "blight_charm": {
+   "sheet": "very_common",
+   "rarity": "very_common",
+   "tier": "better than an empty slot",
+   "rank": 3,
+   "of": 5,
+   "torchless": false,
+   "score": 0.975
+  },
+  "blight_stone": {
+   "sheet": "very_common",
+   "rarity": "very_common",
+   "tier": "nah",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.974
+  },
+  "blood_charm": {
+   "sheet": "uncommon",
+   "rarity": "uncommon",
+   "tier": "very solid",
+   "rank": 1,
+   "of": 5,
+   "torchless": false,
+   "score": 0.976
+  },
+  "bloodied_fetish": {
+   "sheet": "common",
+   "rarity": "common",
+   "tier": "yippie",
+   "rank": 1,
+   "of": 5,
+   "torchless": false,
+   "score": 0.938
+  },
+  "bloodthirst_ring": {
+   "sheet": "uncommon",
+   "rarity": "uncommon",
+   "tier": "useful through a big chunk of the game at the very least",
+   "rank": 0,
+   "of": 5,
+   "torchless": false,
+   "score": 0.92
+  },
+  "bloody_dice": {
+   "sheet": "common",
+   "rarity": "common",
+   "tier": "wouldn't be crazy to run it a couple times",
+   "rank": 2,
+   "of": 5,
+   "torchless": false,
+   "score": 0.949
+  },
+  "bloody_herb": {
+   "sheet": "rare",
+   "rarity": "rare",
+   "tier": "niche",
+   "rank": 3,
+   "of": 5,
+   "torchless": false,
+   "score": 0.93
+  },
+  "book_of_constitution": {
+   "sheet": "uncommon",
+   "rarity": "uncommon",
+   "tier": "yucky",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.944
+  },
+  "book_of_holiness": {
+   "sheet": "uncommon",
+   "rarity": "uncommon",
+   "tier": "yucky",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.916
+  },
+  "book_of_holy_healing": {
+   "sheet": "rare",
+   "rarity": "rare",
+   "tier": "niche",
+   "rank": 3,
+   "of": 5,
+   "torchless": false,
+   "score": 0.938
+  },
+  "book_of_intuition": {
+   "sheet": "common",
+   "rarity": "common",
+   "tier": "wouldn't be crazy to run it a couple times",
+   "rank": 2,
+   "of": 5,
+   "torchless": false,
+   "score": 0.958
+  },
+  "book_of_rage": {
+   "sheet": "uncommon",
+   "rarity": "uncommon",
+   "tier": "yucky",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.889
+  },
+  "book_of_relaxation": {
+   "sheet": "uncommon",
+   "rarity": "uncommon",
+   "tier": "mid",
+   "rank": 3,
+   "of": 5,
+   "torchless": false,
+   "score": 0.912
+  },
+  "book_of_sanity": {
+   "sheet": "very_rare",
+   "rarity": "very_rare",
+   "tier": "sell / keep just to remove from pool",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.874
+  },
+  "brawlers_gloves": {
+   "sheet": "rare",
+   "rarity": "rare",
+   "tier": "just sell",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.948
+  },
+  "bright_tambourine": {
+   "sheet": "rare",
+   "rarity": "rare",
+   "tier": "just sell",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.91
+  },
+  "bulls_eye_bandana": {
+   "sheet": "rare",
+   "rarity": "rare",
+   "tier": "pretty good",
+   "rank": 1,
+   "of": 5,
+   "torchless": false,
+   "score": 0.854
+  },
+  "calming_crystal": {
+   "sheet": "uncommon",
+   "rarity": "uncommon",
+   "tier": "yucky",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.955
+  },
+  "camouflage_cloak": {
+   "sheet": "uncommon",
+   "rarity": "uncommon",
+   "tier": "useful through a big chunk of the game at the very least",
+   "rank": 0,
+   "of": 5,
+   "torchless": false,
+   "score": 0.957
+  },
+  "campers_helmet": {
+   "sheet": "uncommon",
+   "rarity": "uncommon",
+   "tier": "decent",
+   "rank": 2,
+   "of": 5,
+   "torchless": false,
+   "score": 0.977
+  },
+  "caution_cloak": {
+   "sheet": "common",
+   "rarity": "common",
+   "tier": "wouldn't be crazy to run it a couple times",
+   "rank": 2,
+   "of": 5,
+   "torchless": false,
+   "score": 0.947
+  },
+  "cc_coven_signet": {
+   "sheet": "very_rare",
+   "rarity": "very_rare",
+   "tier": "sell / keep just to remove from pool",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.917
+  },
+  "cc_crimson_tincture": {
+   "sheet": "very_rare",
+   "rarity": "very_rare",
+   "tier": "sell / keep just to remove from pool",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.929
+  },
+  "cc_crystal_snifter": {
+   "sheet": "very_rare",
+   "rarity": "very_rare",
+   "tier": "sell / keep just to remove from pool",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.951
+  },
+  "cc_dazzling_mirror": {
+   "sheet": "very_rare",
+   "rarity": "very_rare",
+   "tier": "pretty good",
+   "rank": 1,
+   "of": 5,
+   "torchless": false,
+   "score": 0.867
+  },
+  "cc_mantra_of_fasting": {
+   "sheet": "very_rare",
+   "rarity": "very_rare",
+   "tier": "sell / keep just to remove from pool",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.986
+  },
+  "cc_pagan_talisman": {
+   "sheet": "very_rare",
+   "rarity": "very_rare",
+   "tier": "sell / keep just to remove from pool",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.944
+  },
+  "cc_quicksilver_salve": {
+   "sheet": "very_rare",
+   "rarity": "very_rare",
+   "tier": "sell / keep just to remove from pool",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.967
+  },
+  "cc_rat_carcass": {
+   "sheet": "very_rare",
+   "rarity": "very_rare",
+   "tier": "sell / keep just to remove from pool",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.965
+  },
+  "cc_sculptors_tools": {
+   "sheet": "very_rare",
+   "rarity": "very_rare",
+   "tier": "sell / keep just to remove from pool",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.982
+  },
+  "chirurgeons_charm": {
+   "sheet": "uncommon",
+   "rarity": "uncommon",
+   "tier": "very solid",
+   "rank": 1,
+   "of": 5,
+   "torchless": false,
+   "score": 0.978
+  },
+  "cleansing_crystal": {
+   "sheet": "very_rare",
+   "rarity": "very_rare",
+   "tier": "niche",
+   "rank": 3,
+   "of": 5,
+   "torchless": false,
+   "score": 0.972
+  },
+  "cleansing_eyepatch": {
+   "sheet": "common",
+   "rarity": "common",
+   "tier": "just sell",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.922
+  },
+  "collector_1": {
+   "sheet": "very_rare",
+   "rarity": "collector",
+   "tier": "usable",
+   "rank": 2,
+   "of": 5,
+   "torchless": false,
+   "score": 0.988
+  },
+  "collector_2": {
+   "sheet": "very_rare",
+   "rarity": "collector",
+   "tier": "pretty good",
+   "rank": 1,
+   "of": 5,
+   "torchless": false,
+   "score": 0.97
+  },
+  "collector_3": {
+   "sheet": "very_rare",
+   "rarity": "collector",
+   "tier": "usable",
+   "rank": 2,
+   "of": 5,
+   "torchless": false,
+   "score": 0.964
+  },
+  "commanders_orders": {
+   "sheet": "rare",
+   "rarity": "rare",
+   "tier": "pretty good",
+   "rank": 1,
+   "of": 5,
+   "torchless": false,
+   "score": 0.94
+  },
+  "critical_dice": {
+   "sheet": "uncommon",
+   "rarity": "uncommon",
+   "tier": "yucky",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.936
+  },
+  "critical_stone": {
+   "sheet": "very_common",
+   "rarity": "very_common",
+   "tier": "nah",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.959
+  },
+  "cudgel_weight": {
+   "sheet": "uncommon",
+   "rarity": "uncommon",
+   "tier": "very solid",
+   "rank": 1,
+   "of": 5,
+   "torchless": false,
+   "score": 0.9
+  },
+  "cursed_buckle": {
+   "sheet": "common",
+   "rarity": "common",
+   "tier": "wouldn't be crazy to run it a couple times",
+   "rank": 2,
+   "of": 5,
+   "torchless": false,
+   "score": 0.919
+  },
+  "cursed_incense": {
+   "sheet": "uncommon",
+   "rarity": "uncommon",
+   "tier": "yucky",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.947
+  },
+  "damage_stone": {
+   "sheet": "common",
+   "rarity": "common",
+   "tier": "just sell",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.979
+  },
+  "dark_bracer": {
+   "sheet": "uncommon",
+   "rarity": "uncommon",
+   "tier": "yucky",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.941
+  },
+  "dark_crown": {
+   "sheet": "rare",
+   "rarity": "rare",
+   "tier": "just sell",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.969
+  },
+  "dark_tambourine": {
+   "sheet": "very_rare",
+   "rarity": "very_rare",
+   "tier": "sell / keep just to remove from pool",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.972
+  },
+  "dazzling_charm": {
+   "sheet": "common",
+   "rarity": "common",
+   "tier": "yippie",
+   "rank": 1,
+   "of": 5,
+   "torchless": false,
+   "score": 0.975
+  },
+  "debuff_amulet": {
+   "sheet": "uncommon",
+   "rarity": "uncommon",
+   "tier": "useful through a big chunk of the game at the very least",
+   "rank": 0,
+   "of": 5,
+   "torchless": false,
+   "score": 0.959
+  },
+  "debuff_charm": {
+   "sheet": "very_common",
+   "rarity": "very_common",
+   "tier": "niche but still useful sometimes",
+   "rank": 2,
+   "of": 5,
+   "torchless": false,
+   "score": 0.984
+  },
+  "debuff_stone": {
+   "sheet": "very_common",
+   "rarity": "very_common",
+   "tier": "actually decent",
+   "rank": 0,
+   "of": 5,
+   "torchless": false,
+   "score": 0.968
+  },
+  "defenders_seal": {
+   "sheet": "common",
+   "rarity": "common",
+   "tier": "just sell",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.982
+  },
+  "demons_cauldron": {
+   "sheet": "very_rare",
+   "rarity": "very_rare",
+   "tier": "insane",
+   "rank": 0,
+   "of": 5,
+   "torchless": false,
+   "score": 0.958
+  },
+  "deteriorating_bracer": {
+   "sheet": "common",
+   "rarity": "common",
+   "tier": "just sell",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.963
+  },
+  "disease_charm": {
+   "sheet": "very_common",
+   "rarity": "very_common",
+   "tier": "better than an empty slot",
+   "rank": 3,
+   "of": 5,
+   "torchless": false,
+   "score": 0.934
+  },
+  "diseased_herb": {
+   "sheet": "common",
+   "rarity": "common",
+   "tier": "just sell",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.965
+  },
+  "dodge_stone": {
+   "sheet": "very_common",
+   "rarity": "very_common",
+   "tier": "niche but still useful sometimes",
+   "rank": 2,
+   "of": 5,
+   "torchless": false,
+   "score": 0.97
+  },
+  "dodgy_sheath": {
+   "sheet": "uncommon",
+   "rarity": "uncommon",
+   "tier": "yucky",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.985
+  },
+  "double_edged_pendant": {
+   "sheet": "uncommon",
+   "rarity": "uncommon",
+   "tier": "yucky",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.949
+  },
+  "drifters_buckle": {
+   "sheet": "common",
+   "rarity": "common",
+   "tier": "yippie",
+   "rank": 1,
+   "of": 5,
+   "torchless": false,
+   "score": 0.961
+  },
+  "eldritch_killing_incense": {
+   "sheet": "common",
+   "rarity": "common",
+   "tier": "just sell",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.964
+  },
+  "eldritch_slayers_ring": {
+   "sheet": "rare",
+   "rarity": "rare",
+   "tier": "just sell",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.932
+  },
+  "ethereal_crucifix": {
+   "sheet": "very_rare",
+   "rarity": "very_rare",
+   "tier": "sell / keep just to remove from pool",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.95
+  },
+  "evasion_incense": {
+   "sheet": "common",
+   "rarity": "common",
+   "tier": "wouldn't be crazy to run it a couple times",
+   "rank": 2,
+   "of": 5,
+   "torchless": false,
+   "score": 0.988
+  },
+  "fasting_seal": {
+   "sheet": "rare",
+   "rarity": "rare",
+   "tier": "peak",
+   "rank": 0,
+   "of": 5,
+   "torchless": false,
+   "score": 0.934
+  },
+  "feather_crystal": {
+   "sheet": "rare",
+   "rarity": "rare",
+   "tier": "pretty good",
+   "rank": 1,
+   "of": 5,
+   "torchless": false,
+   "score": 0.966
+  },
+  "flag_1": {
+   "sheet": "very_rare",
+   "rarity": "very_rare",
+   "tier": "sell / keep just to remove from pool",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.771
+  },
+  "flag_2": {
+   "sheet": "rare",
+   "rarity": "rare",
+   "tier": "just sell",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.96
+  },
+  "flag_3": {
+   "sheet": "uncommon",
+   "rarity": "uncommon",
+   "tier": "decent",
+   "rank": 2,
+   "of": 5,
+   "torchless": false,
+   "score": 0.959
+  },
+  "flag_4": {
+   "sheet": "uncommon",
+   "rarity": "uncommon",
+   "tier": "mid",
+   "rank": 3,
+   "of": 5,
+   "torchless": false,
+   "score": 0.946
+  },
+  "flag_5": {
+   "sheet": "common",
+   "rarity": "common",
+   "tier": "just sell",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.966
+  },
+  "flashfire_gunpowder": {
+   "sheet": "common",
+   "rarity": "common",
+   "tier": "just sell",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.939
+  },
+  "focus_ring": {
+   "sheet": "very_rare",
+   "rarity": "very_rare",
+   "tier": "usable",
+   "rank": 2,
+   "of": 5,
+   "torchless": false,
+   "score": 0.971
+  },
+  "fortifying_garlic": {
+   "sheet": "very_rare",
+   "rarity": "very_rare",
+   "tier": "pretty good",
+   "rank": 1,
+   "of": 5,
+   "torchless": false,
+   "score": 0.98
+  },
+  "fortunate_armlet": {
+   "sheet": "uncommon",
+   "rarity": "uncommon",
+   "tier": "useful through a big chunk of the game at the very least",
+   "rank": 0,
+   "of": 5,
+   "torchless": false,
+   "score": 0.947
+  },
+  "gamblers_charm": {
+   "sheet": "uncommon",
+   "rarity": "uncommon",
+   "tier": "decent",
+   "rank": 2,
+   "of": 5,
+   "torchless": false,
+   "score": 0.968
+  },
+  "guardians_shield": {
+   "sheet": "very_rare",
+   "rarity": "very_rare",
+   "tier": "niche",
+   "rank": 3,
+   "of": 5,
+   "torchless": false,
+   "score": 0.897
+  },
+  "haste_chalice": {
+   "sheet": "uncommon",
+   "rarity": "uncommon",
+   "tier": "yucky",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.936
+  },
+  "healing_armlet": {
+   "sheet": "common",
+   "rarity": "common",
+   "tier": "just sell",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.973
+  },
+  "health_stone": {
+   "sheet": "very_common",
+   "rarity": "very_common",
+   "tier": "niche but still useful sometimes",
+   "rank": 2,
+   "of": 5,
+   "torchless": false,
+   "score": 0.97
+  },
+  "heavens_hairpin": {
+   "sheet": "rare",
+   "rarity": "rare",
+   "tier": "p mid but still usable",
+   "rank": 2,
+   "of": 5,
+   "torchless": false,
+   "score": 0.979
+  },
+  "heavy_boots": {
+   "sheet": "uncommon",
+   "rarity": "uncommon",
+   "tier": "useful through a big chunk of the game at the very least",
+   "rank": 0,
+   "of": 5,
+   "torchless": false,
+   "score": 0.968
+  },
+  "hells_hairpin": {
+   "sheet": "very_rare",
+   "rarity": "very_rare",
+   "tier": "torchless",
+   "rank": null,
+   "of": 5,
+   "torchless": true,
+   "score": 0.979
+  },
+  "heros_ring": {
+   "sheet": "very_rare",
+   "rarity": "very_rare",
+   "tier": "niche",
+   "rank": 3,
+   "of": 5,
+   "torchless": false,
+   "score": 0.968
+  },
+  "holy_orders": {
+   "sheet": "very_rare",
+   "rarity": "very_rare",
+   "tier": "sell / keep just to remove from pool",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.936
+  },
+  "hunters_talon": {
+   "sheet": "rare",
+   "rarity": "rare",
+   "tier": "peak",
+   "rank": 0,
+   "of": 5,
+   "torchless": false,
+   "score": 0.971
+  },
+  "immunity_mask": {
+   "sheet": "rare",
+   "rarity": "rare",
+   "tier": "niche",
+   "rank": 3,
+   "of": 5,
+   "torchless": false,
+   "score": 0.957
+  },
+  "knights_crest": {
+   "sheet": "common",
+   "rarity": "common",
+   "tier": "wouldn't be crazy to run it a couple times",
+   "rank": 2,
+   "of": 5,
+   "torchless": false,
+   "score": 0.973
+  },
+  "legendary_bracer": {
+   "sheet": "very_rare",
+   "rarity": "very_rare",
+   "tier": "sell / keep just to remove from pool",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.964
+  },
+  "life_crystal": {
+   "sheet": "uncommon",
+   "rarity": "uncommon",
+   "tier": "yucky",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.971
+  },
+  "longevity_eyepatch": {
+   "sheet": "uncommon",
+   "rarity": "uncommon",
+   "tier": "yucky",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.976
+  },
+  "lucky_dice": {
+   "sheet": "common",
+   "rarity": "common",
+   "tier": "yippie",
+   "rank": 1,
+   "of": 5,
+   "torchless": false,
+   "score": 0.979
+  },
+  "lucky_talisman": {
+   "sheet": "rare",
+   "rarity": "rare",
+   "tier": "peak",
+   "rank": 0,
+   "of": 5,
+   "torchless": false,
+   "score": 0.949
+  },
+  "madman_1": {
+   "sheet": "very_rare",
+   "rarity": "madman",
+   "tier": "sell / keep just to remove from pool",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.96
+  },
+  "madman_2": {
+   "sheet": "very_rare",
+   "rarity": "madman",
+   "tier": "pretty good",
+   "rank": 1,
+   "of": 5,
+   "torchless": false,
+   "score": 0.959
+  },
+  "madman_3": {
+   "sheet": "very_rare",
+   "rarity": "madman",
+   "tier": "pretty good",
+   "rank": 1,
+   "of": 5,
+   "torchless": false,
+   "score": 0.947
+  },
+  "man_slayers_ring": {
+   "sheet": "rare",
+   "rarity": "rare",
+   "tier": "just sell",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.934
+  },
+  "martyrs_seal": {
+   "sheet": "very_rare",
+   "rarity": "very_rare",
+   "tier": "sell / keep just to remove from pool",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.919
+  },
+  "medics_greaves": {
+   "sheet": "uncommon",
+   "rarity": "uncommon",
+   "tier": "useful through a big chunk of the game at the very least",
+   "rank": 0,
+   "of": 5,
+   "torchless": false,
+   "score": 0.95
+  },
+  "moon_cloak": {
+   "sheet": "rare",
+   "rarity": "rare",
+   "tier": "torchless exclusive",
+   "rank": null,
+   "of": 5,
+   "torchless": true,
+   "score": 0.951
+  },
+  "moon_ring": {
+   "sheet": "rare",
+   "rarity": "rare",
+   "tier": "torchless exclusive",
+   "rank": null,
+   "of": 5,
+   "torchless": true,
+   "score": 0.945
+  },
+  "move_amulet": {
+   "sheet": "uncommon",
+   "rarity": "uncommon",
+   "tier": "very solid",
+   "rank": 1,
+   "of": 5,
+   "torchless": false,
+   "score": 0.955
+  },
+  "move_charm": {
+   "sheet": "very_common",
+   "rarity": "very_common",
+   "tier": "better than an empty slot",
+   "rank": 3,
+   "of": 5,
+   "torchless": false,
+   "score": 0.96
+  },
+  "move_stone": {
+   "sheet": "very_common",
+   "rarity": "very_common",
+   "tier": "niche but still useful sometimes",
+   "rank": 2,
+   "of": 5,
+   "torchless": false,
+   "score": 0.979
+  },
+  "padlock_1": {
+   "sheet": "common",
+   "rarity": "common",
+   "tier": "just sell",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.967
+  },
+  "padlock_2": {
+   "sheet": "uncommon",
+   "rarity": "uncommon",
+   "tier": "useful through a big chunk of the game at the very least",
+   "rank": 0,
+   "of": 5,
+   "torchless": false,
+   "score": 0.952
+  },
+  "padlock_3": {
+   "sheet": "uncommon",
+   "rarity": "uncommon",
+   "tier": "mid",
+   "rank": 3,
+   "of": 5,
+   "torchless": false,
+   "score": 0.919
+  },
+  "padlock_4": {
+   "sheet": "rare",
+   "rarity": "rare",
+   "tier": "niche",
+   "rank": 3,
+   "of": 5,
+   "torchless": false,
+   "score": 0.939
+  },
+  "padlock_5": {
+   "sheet": "very_rare",
+   "rarity": "very_rare",
+   "tier": "sell / keep just to remove from pool",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.935
+  },
+  "paralyzers_crest": {
+   "sheet": "uncommon",
+   "rarity": "uncommon",
+   "tier": "useful through a big chunk of the game at the very least",
+   "rank": 0,
+   "of": 5,
+   "torchless": false,
+   "score": 0.929
+  },
+  "poisoned_herb": {
+   "sheet": "uncommon",
+   "rarity": "uncommon",
+   "tier": "yucky",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.942
+  },
+  "poisoning_buckle": {
+   "sheet": "very_rare",
+   "rarity": "very_rare",
+   "tier": "insane",
+   "rank": 0,
+   "of": 5,
+   "torchless": false,
+   "score": 0.98
+  },
+  "profane_scroll": {
+   "sheet": "rare",
+   "rarity": "rare",
+   "tier": "just sell",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.968
+  },
+  "protection_stone": {
+   "sheet": "very_common",
+   "rarity": "very_common",
+   "tier": "niche but still useful sometimes",
+   "rank": 2,
+   "of": 5,
+   "torchless": false,
+   "score": 0.981
+  },
+  "protective_collar": {
+   "sheet": "rare",
+   "rarity": "rare",
+   "tier": "pretty good",
+   "rank": 1,
+   "of": 5,
+   "torchless": false,
+   "score": 0.953
+  },
+  "quick_draw_charm": {
+   "sheet": "rare",
+   "rarity": "rare",
+   "tier": "pretty good",
+   "rank": 1,
+   "of": 5,
+   "torchless": false,
+   "score": 0.964
+  },
+  "quickening_satchel": {
+   "sheet": "common",
+   "rarity": "common",
+   "tier": "actually really good, might get value later on in game even",
+   "rank": 0,
+   "of": 5,
+   "torchless": false,
+   "score": 0.945
+  },
+  "raiders_talisman": {
+   "sheet": "very_rare",
+   "rarity": "very_rare",
+   "tier": "sell / keep just to remove from pool",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.934
+  },
+  "rampart_shield": {
+   "sheet": "rare",
+   "rarity": "rare",
+   "tier": "pretty good",
+   "rank": 1,
+   "of": 5,
+   "torchless": false,
+   "score": 0.966
+  },
+  "reckless_charm": {
+   "sheet": "common",
+   "rarity": "common",
+   "tier": "yippie",
+   "rank": 1,
+   "of": 5,
+   "torchless": false,
+   "score": 0.957
+  },
+  "recovery_chalice": {
+   "sheet": "common",
+   "rarity": "common",
+   "tier": "just sell",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.952
+  },
+  "recovery_charm": {
+   "sheet": "rare",
+   "rarity": "rare",
+   "tier": "p mid but still usable",
+   "rank": 2,
+   "of": 5,
+   "torchless": false,
+   "score": 0.984
+  },
+  "rotgut_censer": {
+   "sheet": "common",
+   "rarity": "common",
+   "tier": "wouldn't be crazy to run it a couple times",
+   "rank": 2,
+   "of": 5,
+   "torchless": false,
+   "score": 0.972
+  },
+  "sacred_scroll": {
+   "sheet": "very_rare",
+   "rarity": "very_rare",
+   "tier": "sell / keep just to remove from pool",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.905
+  },
+  "sacrificial_cauldron": {
+   "sheet": "rare",
+   "rarity": "rare",
+   "tier": "just sell",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.958
+  },
+  "sb_1": {
+   "sheet": "common",
+   "rarity": "shieldbreaker",
+   "tier": "just sell",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.972
+  },
+  "sb_2": {
+   "sheet": "uncommon",
+   "rarity": "shieldbreaker",
+   "tier": "mid",
+   "rank": 3,
+   "of": 5,
+   "torchless": false,
+   "score": 0.952
+  },
+  "sb_3": {
+   "sheet": "uncommon",
+   "rarity": "shieldbreaker",
+   "tier": "very solid",
+   "rank": 1,
+   "of": 5,
+   "torchless": false,
+   "score": 0.98
+  },
+  "sb_4": {
+   "sheet": "rare",
+   "rarity": "shieldbreaker",
+   "tier": "just sell",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.967
+  },
+  "sb_5": {
+   "sheet": "very_rare",
+   "rarity": "shieldbreaker",
+   "tier": "sell / keep just to remove from pool",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.957
+  },
+  "scouting_whistle": {
+   "sheet": "common",
+   "rarity": "common",
+   "tier": "yippie",
+   "rank": 1,
+   "of": 5,
+   "torchless": false,
+   "score": 0.959
+  },
+  "seer_stone": {
+   "sheet": "uncommon",
+   "rarity": "uncommon",
+   "tier": "very solid",
+   "rank": 1,
+   "of": 5,
+   "torchless": false,
+   "score": 0.968
+  },
+  "seers_satchel": {
+   "sheet": "uncommon",
+   "rarity": "uncommon",
+   "tier": "yucky",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.944
+  },
+  "selfish_armlet": {
+   "sheet": "common",
+   "rarity": "common",
+   "tier": "just sell",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.973
+  },
+  "selfish_pendant": {
+   "sheet": "common",
+   "rarity": "common",
+   "tier": "use it once, toss away later",
+   "rank": 3,
+   "of": 5,
+   "torchless": false,
+   "score": 0.967
+  },
+  "sharpening_sheath": {
+   "sheet": "rare",
+   "rarity": "rare",
+   "tier": "niche",
+   "rank": 3,
+   "of": 5,
+   "torchless": false,
+   "score": 0.983
+  },
+  "shimmering_cloak": {
+   "sheet": "uncommon",
+   "rarity": "uncommon",
+   "tier": "decent",
+   "rank": 2,
+   "of": 5,
+   "torchless": false,
+   "score": 0.966
+  },
+  "slippery_boots": {
+   "sheet": "common",
+   "rarity": "common",
+   "tier": "yippie",
+   "rank": 1,
+   "of": 5,
+   "torchless": false,
+   "score": 0.954
+  },
+  "sly_eyepatch": {
+   "sheet": "common",
+   "rarity": "common",
+   "tier": "just sell",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.96
+  },
+  "snake_oil": {
+   "sheet": "common",
+   "rarity": "common",
+   "tier": "use it once, toss away later",
+   "rank": 3,
+   "of": 5,
+   "torchless": false,
+   "score": 0.98
+  },
+  "snipers_ring": {
+   "sheet": "rare",
+   "rarity": "rare",
+   "tier": "just sell",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.914
+  },
+  "solar_bracer": {
+   "sheet": "uncommon",
+   "rarity": "uncommon",
+   "tier": "yucky",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.954
+  },
+  "solar_crown": {
+   "sheet": "rare",
+   "rarity": "rare",
+   "tier": "just sell",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.911
+  },
+  "speed_stone": {
+   "sheet": "common",
+   "rarity": "common",
+   "tier": "yippie",
+   "rank": 1,
+   "of": 5,
+   "torchless": false,
+   "score": 0.96
+  },
+  "spiked_collar": {
+   "sheet": "very_rare",
+   "rarity": "very_rare",
+   "tier": "sell / keep just to remove from pool",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.926
+  },
+  "steady_bracer": {
+   "sheet": "uncommon",
+   "rarity": "uncommon",
+   "tier": "very solid",
+   "rank": 1,
+   "of": 5,
+   "torchless": false,
+   "score": 0.969
+  },
+  "stun_amulet": {
+   "sheet": "uncommon",
+   "rarity": "uncommon",
+   "tier": "very solid",
+   "rank": 1,
+   "of": 5,
+   "torchless": false,
+   "score": 0.979
+  },
+  "stun_charm": {
+   "sheet": "very_common",
+   "rarity": "very_common",
+   "tier": "niche but still useful sometimes",
+   "rank": 2,
+   "of": 5,
+   "torchless": false,
+   "score": 0.976
+  },
+  "stun_stone": {
+   "sheet": "very_common",
+   "rarity": "very_common",
+   "tier": "actually decent",
+   "rank": 0,
+   "of": 5,
+   "torchless": false,
+   "score": 0.948
+  },
+  "stunning_satchel": {
+   "sheet": "common",
+   "rarity": "common",
+   "tier": "use it once, toss away later",
+   "rank": 3,
+   "of": 5,
+   "torchless": false,
+   "score": 0.967
+  },
+  "sturdy_greaves": {
+   "sheet": "common",
+   "rarity": "common",
+   "tier": "just sell",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.931
+  },
+  "sun_cloak": {
+   "sheet": "rare",
+   "rarity": "rare",
+   "tier": "peak",
+   "rank": 0,
+   "of": 5,
+   "torchless": false,
+   "score": 0.98
+  },
+  "sun_ring": {
+   "sheet": "rare",
+   "rarity": "rare",
+   "tier": "p mid but still usable",
+   "rank": 2,
+   "of": 5,
+   "torchless": false,
+   "score": 0.974
+  },
+  "surgical_glove": {
+   "sheet": "uncommon",
+   "rarity": "uncommon",
+   "tier": "useful through a big chunk of the game at the very least",
+   "rank": 0,
+   "of": 5,
+   "torchless": false,
+   "score": 0.951
+  },
+  "survival_guide": {
+   "sheet": "common",
+   "rarity": "common",
+   "tier": "yippie",
+   "rank": 1,
+   "of": 5,
+   "torchless": false,
+   "score": 0.917
+  },
+  "swift_cloak": {
+   "sheet": "uncommon",
+   "rarity": "uncommon",
+   "tier": "very solid",
+   "rank": 1,
+   "of": 5,
+   "torchless": false,
+   "score": 0.977
+  },
+  "swordsmans_crest": {
+   "sheet": "common",
+   "rarity": "common",
+   "tier": "wouldn't be crazy to run it a couple times",
+   "rank": 2,
+   "of": 5,
+   "torchless": false,
+   "score": 0.945
+  },
+  "tempting_goblet": {
+   "sheet": "very_rare",
+   "rarity": "courtier",
+   "tier": "insane",
+   "rank": 0,
+   "of": 5,
+   "torchless": false,
+   "score": 0.951
+  },
+  "tenacity_ring": {
+   "sheet": "uncommon",
+   "rarity": "uncommon",
+   "tier": "yucky",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.964
+  },
+  "tough_ring": {
+   "sheet": "very_rare",
+   "rarity": "very_rare",
+   "tier": "pretty good",
+   "rank": 1,
+   "of": 5,
+   "torchless": false,
+   "score": 0.981
+  },
+  "unholy_slayers_ring": {
+   "sheet": "rare",
+   "rarity": "rare",
+   "tier": "just sell",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.957
+  },
+  "unmovable_helmet": {
+   "sheet": "common",
+   "rarity": "common",
+   "tier": "yippie",
+   "rank": 1,
+   "of": 5,
+   "torchless": false,
+   "score": 0.974
+  },
+  "vengeful_greaves": {
+   "sheet": "common",
+   "rarity": "common",
+   "tier": "use it once, toss away later",
+   "rank": 3,
+   "of": 5,
+   "torchless": false,
+   "score": 0.952
+  },
+  "warriors_bracer": {
+   "sheet": "common",
+   "rarity": "common",
+   "tier": "just sell",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.966
+  },
+  "warriors_cap": {
+   "sheet": "common",
+   "rarity": "common",
+   "tier": "yippie",
+   "rank": 1,
+   "of": 5,
+   "torchless": false,
+   "score": 0.973
+  },
+  "witchs_vial": {
+   "sheet": "common",
+   "rarity": "common",
+   "tier": "actually really good, might get value later on in game even",
+   "rank": 0,
+   "of": 5,
+   "torchless": false,
+   "score": 0.929
+  },
+  "worrystone": {
+   "sheet": "uncommon",
+   "rarity": "uncommon",
+   "tier": "yucky",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.968
+  },
+  "wounding_helmet": {
+   "sheet": "very_rare",
+   "rarity": "very_rare",
+   "tier": "sell / keep just to remove from pool",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.954
+  },
+  "wrathful_bandana": {
+   "sheet": "very_rare",
+   "rarity": "very_rare",
+   "tier": "usable",
+   "rank": 2,
+   "of": 5,
+   "torchless": false,
+   "score": 0.782
+  },
+  "youth_chalice": {
+   "sheet": "uncommon",
+   "rarity": "uncommon",
+   "tier": "yucky",
+   "rank": 4,
+   "of": 5,
+   "torchless": false,
+   "score": 0.918
+  }
+ },
+ "rejected": []
+}

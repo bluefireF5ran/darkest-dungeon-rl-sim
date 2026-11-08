@@ -139,8 +139,10 @@ def test_trinkets_reapply_at_the_start_of_every_internal_combat():
 
 
 def test_hero_death_does_not_end_the_episode():
-    """Force the party to 1 HP with no death_blow_resist, then watch a hero die
-    mid-expedition and the survivors carry on.
+    """Put the party on Death's Door with no death_blow_resist, so the first
+    hit a hero takes kills, then watch a hero die mid-expedition and the
+    survivors carry on. (It was 1 HP, which leaned on a turn-start deathblow
+    roll the game does not make -- changelog 2026-10-11.)
 
     This asserted NOTHING until 2026-08-27 -- it played the episode out and
     printed a summary, so it could only ever fail by raising. Both halves of the
@@ -153,7 +155,8 @@ def test_hero_death_does_not_end_the_episode():
         "zone_id": "crypts", "tier": 1, "length_band": "short", "num_combats": 2,
     })
     for h in env.engine.heroes:
-        h.hp = 1
+        h.hp = 0
+        h.is_deaths_door = True
         h.death_blow_resist = 0.0
     original_count = len(env.engine.heroes)
 

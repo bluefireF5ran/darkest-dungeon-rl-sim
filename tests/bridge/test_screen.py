@@ -764,3 +764,262 @@ def test_park_cursor_survives_a_window_it_cannot_read():
             raise RuntimeError("no window")
 
     assert screen.park_cursor(_Broken()) is False
+
+# -- a PURE BLACK frame, and the cause that cost a whole night ---------------
+#
+# 2026-09-21: the 09:15 run was scored `no-game` over four iterations while
+# the game ran perfectly -- 16.9% of the GPU's 3D engine, a live `title`
+# screen. The monitor had gone to sleep. The desktop still read fine from its
+# cached composition, so every control said the machine was healthy.
+
+class _Win:
+    """Enough of a `GameWindow` for the geometry branch."""
+
+    def __init__(self, borderless=False):
+        self.borderless = borderless
+        self.hwnd = 1
+        self.client_size = (1280, 720)
+
+
+def _black_why(monkeypatch, win, covers):
+    import bridge.screen as S
+    import bridge.window as W
+
+    frame = np.zeros((8, 8, 3), dtype=np.uint8)
+    monkeypatch.setattr(S, "grab", lambda _win: frame)
+    monkeypatch.setattr(S.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(W, "covers_a_monitor", lambda _w: covers)
+    return S.display_is_live(win, gap=1.2, samples=3)
+
+
+def test_a_black_frame_names_the_SLEEPING_DISPLAY_first(monkeypatch):
+    """The cause that was actually measured has to be the first one read,
+    and it needs a remedy the loop can perform unattended."""
+    live, why = _black_why(monkeypatch, _Win(borderless=False), covers=False)
+    assert live is False
+    assert "PURE BLACK" in why
+    assert "powered down" in why, "the measured cause has to be named"
+    assert "wake_display" in why and "keep_display_awake" in why
+
+
+def test_it_does_not_tell_the_operator_to_do_what_is_already_DONE(monkeypatch):
+    """The 09:15 message said "relaunch windowed and smaller" to a window
+    that was already 1296x759 on a 1920x1080 monitor."""
+    _live, why = _black_why(monkeypatch, _Win(borderless=False), covers=False)
+    assert "-fullscreen 0" not in why
+
+
+def test_it_does_not_OVERCORRECT_into_ruling_the_flip_path_out(monkeypatch):
+    """The first fix claimed "not covering a monitor, therefore composited".
+    The game in that state WAS drawing and GDI still read nothing, so a
+    windowed swapchain can leave the composited path too."""
+    _live, why = _black_why(monkeypatch, _Win(borderless=False), covers=False)
+    assert "multiplane overlay" in why
+    assert "GPU 3D time" in why, "name the instrument that needs no frame"
+
+
+def test_a_window_COVERING_the_monitor_still_gets_the_flip_remedy(monkeypatch):
+    """The 2026-09-03 case is real and must survive: that one IS the flip
+    path, and the fix is to stop the window covering the monitor."""
+    live, why = _black_why(monkeypatch, _Win(borderless=True), covers=True)
+    assert live is False
+    assert "-fullscreen 0 -size 1280 720" in why
+
+
+def test_geometry_it_cannot_READ_names_both_causes(monkeypatch):
+    """Refusing to guess is the point. A `win` that cannot answer leaves both
+    standing rather than picking the one that reads better."""
+    import bridge.screen as S
+    import bridge.window as W
+
+    def _boom(_w):
+        raise AttributeError("no window rect")
+
+    frame = np.zeros((8, 8, 3), dtype=np.uint8)
+    monkeypatch.setattr(S, "grab", lambda _win: frame)
+    monkeypatch.setattr(S.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(W, "covers_a_monitor", _boom)
+
+    live, why = S.display_is_live(object(), gap=1.2, samples=3)
+    assert live is False
+    assert "-fullscreen 0" in why and "both causes stand" in why
+
+
+def test_keep_display_awake_and_wake_display_report_what_windows_said(
+        monkeypatch):
+    """Both are one syscall, and the return value is the only evidence the
+    night gets that the request was accepted -- so it may not be invented."""
+    import bridge.window as W
+
+    calls = []
+    monkeypatch.setattr(
+        W.kernel32, "SetThreadExecutionState",
+        lambda flags: calls.append(int(getattr(flags, "value", flags))) or 1)
+    monkeypatch.setattr(W.user32, "mouse_event",
+                        lambda *a: calls.append("move"))
+
+    assert W.keep_display_awake(True) is True
+    assert calls[0] & W.ES_DISPLAY_REQUIRED, "the DISPLAY flag is the point"
+    assert calls[0] & W.ES_CONTINUOUS, "without ES_CONTINUOUS it is one-shot"
+
+    calls.clear()
+    assert W.keep_display_awake(False) is True
+    assert calls[0] == W.ES_CONTINUOUS, "releasing keeps only ES_CONTINUOUS"
+
+    calls.clear()
+    assert W.wake_display() is True
+    assert "move" in calls, "a request alone does not wake a dark monitor"
+
+
+def test_a_refused_request_is_reported_as_refused(monkeypatch):
+    """`SetThreadExecutionState` returning 0 means the display may still
+    sleep, and the night has to say so rather than claim it is safe."""
+    import bridge.window as W
+
+    monkeypatch.setattr(W.kernel32, "SetThreadExecutionState", lambda _f: 0)
+    assert W.keep_display_awake(True) is False
+
+# -- the hunger PANEL, matched without the room behind it -------------------
+
+def test_the_hunger_panel_is_found_in_every_room_it_was_banked_in():
+    """**A floating panel is the wrong thing to match whole-screen.** `hunger`
+    was banked three times -- plain, dark, and over a corridor -- and the
+    fourth room it appeared in read UNKNOWN, because a whole-frame reference
+    carries the room art behind the panel. `_answer_hunger` then refuses to
+    click and the modal swallows every other input, which deadlocked a raid
+    on 2026-09-21 with a lone Grave Robber on 3 HP at 157 stress.
+    """
+    import bridge.screen as S
+    from PIL import Image
+
+    banked = sorted(S.CAPTURES_SCREENS.glob("hunger*.png"))
+    assert banked, "no hunger captures to check against"
+    for path in banked:
+        img = np.asarray(Image.open(path).convert("RGB"))
+        assert S.hunger_panel_is_up(img), path.name
+
+
+def test_it_does_not_fire_on_screens_that_are_NOT_hunger():
+    """The measured gap is three orders of magnitude -- 0.000-0.002 for the
+    hunger frames against 0.792 for the nearest other screen."""
+    import bridge.screen as S
+    from PIL import Image
+
+    others = [p for p in sorted(S.CAPTURES_SCREENS.glob("*.png"))
+              if "hunger" not in p.name]
+    assert others, "no other captures to check against"
+    for path in others:
+        img = np.asarray(Image.open(path).convert("RGB"))
+        assert not S.hunger_panel_is_up(img), path.name
+
+
+def test_the_title_card_is_found_whatever_the_dungeon():
+    """The Cove and the Weald cards each stalled a raid as unbanked variants
+    (2026-09-23). The fixed lower half is the same in every region, so match
+    that -- every banked card must pass and no other banked screen may."""
+    import bridge.screen as S
+    from PIL import Image
+
+    cards = sorted(S.CAPTURES_SCREENS.glob("dungeon_intro*.png"))
+    assert len(cards) >= 3
+    for path in sorted(S.CAPTURES_SCREENS.glob("*.png")):
+        img = np.asarray(Image.open(path).convert("RGB"))
+        assert S.title_card_is_up(img) is (path in cards), path.name
+    assert S.title_card_is_up(None) is False
+
+
+def test_enemy_bars_tell_a_finished_fight_from_a_live_one():
+    """A live fight shows red under the enemy ranks -- even a last sliver of
+    hp -- and exploration shows none. Held on the banked title and town
+    screens, which have no enemies and must read exactly 0."""
+    import bridge.screen as S
+    from PIL import Image
+
+    for name in ("hamlet.png", "dungeon_intro@cove.png"):
+        img = np.asarray(Image.open(S.CAPTURES_SCREENS / name).convert("RGB"))
+        assert S.enemy_bars_drawn(img) == 0.0, name
+    fake = np.zeros((720, 1280, 3), dtype=np.uint8)
+    fake[462:468, 740:760] = (200, 20, 20)          # a last sliver of hp
+    assert S.enemy_bars_drawn(fake) > 0.0
+    assert S.enemy_bars_drawn(None) is None
+
+
+def test_the_progression_strip_is_found_on_every_progression_page():
+    """The page's art is the dungeon's own backdrop, so it misses whole-frame
+    refs region by region; its bottom strip does not (2026-09-23)."""
+    import bridge.screen as S
+    from PIL import Image
+
+    for path in sorted(S.CAPTURES_SCREENS.glob("*.png")):
+        img = np.asarray(Image.open(path).convert("RGB"))
+        want = path.name.startswith("raid_progression")
+        assert S.progression_strip_is_up(img) is want, path.name
+
+
+def test_a_journal_page_is_found_and_nothing_else_is():
+    """A curio's journal page sat unanswered over a Cove corridor for six
+    minutes on 2026-09-23. Matched on its close X and wax seal."""
+    import bridge.screen as S
+    from PIL import Image
+
+    assert S.journal_page_is_up(np.asarray(
+        Image.open(S.JOURNAL_REF).convert("RGB")))
+    for path in sorted(S.CAPTURES_SCREENS.glob("*.png")):
+        img = np.asarray(Image.open(path).convert("RGB"))
+        assert not S.journal_page_is_up(img), path.name
+    assert S.journal_page_is_up(None) is False
+
+
+def test_a_results_page_is_found_by_its_header_and_strip():
+    """A completed Cove quest's results page, with a gem tooltip up, went
+    unrecognised (2026-09-23). Header crest AND results strip: every banked
+    results page passes, nothing else does -- the Hamlet's Embark button
+    shares the strip, and the header is what rules it out."""
+    import bridge.screen as S
+    from PIL import Image
+
+    live = np.asarray(Image.open(S.CAPTURES_SCREENS.parent
+                                 / "results_complete_escape.png").convert("RGB"))
+    assert S.recognise(live) == "raid_results"
+    for path in sorted(S.CAPTURES_SCREENS.glob("*.png")):
+        img = np.asarray(Image.open(path).convert("RGB"))
+        assert S.results_page_is_up(img) is path.name.startswith(
+            "raid_results"), path.name
+
+
+def test_the_help_card_is_found_and_nothing_else_is():
+    """Fran's pause switch (2026-09-23): the backend holds every input while
+    the game's help card is open."""
+    import bridge.screen as S
+    from PIL import Image
+
+    assert S.help_card_is_up(np.asarray(Image.open(S.HELP_CARD_REF).convert("RGB")))
+    for path in sorted(S.CAPTURES_SCREENS.glob("*.png")):
+        img = np.asarray(Image.open(path).convert("RGB"))
+        assert not S.help_card_is_up(img), path.name
+    assert S.help_card_is_up(None) is False
+
+
+def test_a_building_panel_is_known_by_its_title_plate():
+    """The coach panel with the coachman's speech bubble over it failed the
+    whole-frame match on 2026-09-23 and the town visit was skipped. The title
+    plate identifies it; no screen that is not a panel matches."""
+    import bridge.screen as S
+    from PIL import Image
+
+    live = np.asarray(Image.open(S.CAPTURES_SCREENS.parent
+                                 / "coach_panel_speech_bubble.png").convert("RGB"))
+    assert S.panel_title_match(live) == "stage_coach_panel"
+    for path in sorted(S.CAPTURES_SCREENS.glob("*.png")):
+        img = np.asarray(Image.open(path).convert("RGB"))
+        got = S.panel_title_match(img)
+        assert (got != "") == ("_panel" in path.name), path.name
+
+
+def test_an_unreadable_frame_is_not_a_hunger_panel():
+    """It runs ahead of every layer on every update, so it must cost nothing
+    and claim nothing when the capture fails."""
+    import bridge.screen as S
+
+    assert S.hunger_panel_is_up(None) is False
+

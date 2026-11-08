@@ -131,7 +131,23 @@ def test_the_walk_takes_every_action_the_env_allows():
                 elif policy == "cycle":
                     action = int(legal[i % len(legal)])
                 else:
-                    action = int(legal[pick.randrange(len(legal))])
+                    # PREFER AN ACTION NOTHING HAS TAKEN YET. Both
+                    # policies were blind -- `cycle` walks an index and
+                    # `random` rolls -- so coverage was left to luck, and
+                    # the luck ran out: PASS (36) is legal in states the
+                    # cycle index never lands on, so this test reported
+                    # the oracle blind to an action the walk could reach
+                    # any time it tried. Which action went unspent even
+                    # drifted with unrelated engine changes (27 before the
+                    # `.launch` fix, 36 after), which is the tell that it
+                    # was measuring the walk and not the oracle.
+                    #
+                    # Still seeded, so the walk stays reproducible, and
+                    # `taken` accumulates across policies so this closes
+                    # whatever `cycle` left behind.
+                    fresh = [a for a in legal if taken[a] == 0]
+                    pool = fresh if fresh else legal
+                    action = int(pool[pick.randrange(len(pool))])
                 taken[action] += 1
                 _o, _r, term, trunc, _i = env.step(action)
                 if term or trunc:

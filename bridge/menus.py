@@ -544,6 +544,36 @@ class BootRunner:
                 self.scrolled = 0
             plan = plan_for(name, self.resolved, slot=self.slot,
                             scrolled=self.scrolled)
+            # **A NEW CAMPAIGN WANTS ANY EMPTY LETTER, NOT A COMPUTED ROW.**
+            # Only when the slot asked for holds no campaign -- loading a
+            # named save still goes through the arithmetic, because there the
+            # row identifies WHICH save and a wrong one is a wrong campaign.
+            # A REFUSAL IS NOT A STARTING POINT. `plan_for` refuses a slot
+            # that is not on the list at all, and turning that into "scroll
+            # and look" would carry on past the one thing that was certain.
+            # Nor does this run on a frame it cannot read: a search that
+            # cannot see must not be the thing that decides, which is the
+            # rule `_save_row_looks_wrong` already carries.
+            if (name == "save_select" and not plan.refusal
+                    and campaign_row(self.slot) is None
+                    and self._frame is not None
+                    and getattr(self._frame, "ndim", 0) == 3):
+                found, why = self._empty_letter_plan()
+                if found is not None:
+                    plan = found
+                elif self.scrolled < self.MAX_LETTER_SCROLLS:
+                    pt = self.resolved.menu_point("save_scroll_down")
+                    if pt is not None:
+                        plan = InputPlan(
+                            (Step("click", screen=pt,
+                                  label="scroll the save list"),),
+                            "menu", f"{why} - scrolling to find one "
+                                    f"({self.scrolled + 1} of "
+                                    f"{self.MAX_LETTER_SCROLLS})")
+                else:
+                    plan = refuse(
+                        f"{why} after {self.scrolled} scroll(s) - the list "
+                        f"may be scrolled past them", "menu")
             if name == "save_select" and not plan.refusal:
                 stop = self._save_row_looks_wrong(plan)
                 if stop:
@@ -601,6 +631,51 @@ class BootRunner:
             self._await_change(name, patient=name in PATIENT_SCREENS)
         self._say("  [boot] timed out")
         return False
+
+    #: How many scroll clicks the new-campaign search may spend before it
+    #: gives up. One is enough on any disk seen so far -- the list scrolls
+    #: about three rows per click -- and the bound matters because scrolling
+    #: PAST the letters lands on the campaigns at the bottom, where searching
+    #: harder finds nothing and clicking would load somebody's save.
+    MAX_LETTER_SCROLLS = 3
+
+    def _empty_letter_plan(self):
+        """Click a row the FRAME says is an empty letter. `(plan, why)`.
+
+        **The slot arithmetic cannot be trusted and no longer has to be.**
+        `scroll_plan` needs three numbers to be right at once -- how many rows
+        the list holds, how many are visible, and how far one arrow click
+        scrolls -- and measured live 2026-09-21 the last two are both wrong:
+        `VISIBLE_SAVE_ROWS` says 2 where the viewport draws 3, and one click
+        moves about three rows rather than `SAVE_ROWS_PER_CLICK`. The arrival
+        row it computes is therefore a guess, and the guard that catches the
+        guess then refuses the boot.
+
+        None of it is needed for a NEW campaign. `reset.claim_created` owns
+        whatever slot the game ends up making, so the requirement is no longer
+        "the row for slot N" -- it is "any empty letter", and the frame says
+        which rows those are. `row_holds_a_campaign` is the same predicate the
+        safety gate already uses, so this cannot disagree with the check that
+        follows it.
+
+        Returns `(None, why)` when there is no letter in view, so the caller
+        can scroll and look again rather than click something it did not
+        identify.
+        """
+        img = self._frame
+        if img is None or getattr(img, "ndim", 0) != 3:
+            return None, "no frame to read the rows from"
+        for row in range(VISIBLE_SAVE_ROWS):
+            if row_holds_a_campaign(img, row):
+                continue
+            pt = self.resolved.save_row(row)
+            if pt is None:
+                continue
+            return InputPlan(
+                (Step("click", screen=pt, label=f"save row {row}"),),
+                "menu", f"the empty letter drawn on visible row {row}"), ""
+        return None, (f"none of the {VISIBLE_SAVE_ROWS} visible rows is an "
+                      f"empty letter")
 
     def _save_row_looks_wrong(self, plan) -> str:
         """Refuse a save-row click whose row does not hold what disk says.

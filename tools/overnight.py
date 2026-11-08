@@ -82,13 +82,34 @@ GAME_EXE = GAME_DIR / "_windows" / "win64" / "Darkest.exe"
 # unchanged either way, since every point in it is a fraction of the CLIENT
 # rect rather than a screen pixel.
 #
-# **`-size` IS ACCEPTED AND IGNORED**, so it is not here. `app.log` echoes
-# `size '1600x900'` and the client still comes up 1280x720: the windowed size
-# is the game's own Video resolution setting, not a launch option. It is left
-# off rather than left in, because a flag that appears to work is worse than no
-# flag -- see `MIN_CLIENT_W`, which is what actually guards the size.
+# **`-size` TAKES TWO TOKENS, AND WITH TWO IT WORKS.** This file used to say
+# it was "accepted and ignored", measured by passing `-size 1600x900` and
+# watching the client come up 1280x720 anyway. The parser splits on spaces
+# like every other plinth option, so `1600x900` was consumed as ONE value and
+# dropped, and the conclusion drawn from it was that the windowed size is only
+# the game's own Video setting. Re-measured 2026-09-20 with `-size 1280 720`:
+# `app.log` echoes `"1280"` and `"720"` on separate lines and the window comes
+# up with a 1280x720 CLIENT and a border. Corrected here rather than in a note,
+# because the wrong version of this fact costs the whole night --
+#
+# **at the default resolution the bridge is BLIND.** With no `-size` the game
+# takes the desktop resolution, which on this machine makes a borderless
+# window covering monitor 1 exactly; DWM then gives it the independent-flip
+# path and never updates the redirection surface GDI reads. Every capture
+# comes back pure black, or -- worse, because it looks like a working session
+# -- frozen on whatever frame was composited last. Measured the same day: at
+# 1920x1080 eight consecutive grabs were byte-identical while the game was
+# visibly on a DIFFERENT screen, so the boot read `title` forever, decided
+# three correct clicks had done nothing, and deleted the campaign. At
+# 1280x720 the same check reads "the picture is changing".
+#
+# `-fullscreen 0` alone is NOT enough and never was; it is the pair that
+# works. `window.nudge_off_monitor` is the recovery for a game somebody else
+# launched, and this is the prevention.
+LAUNCH_SIZE = (1280, 720)
 LAUNCH_FLAGS = ["-skipvalidation", "-skipfeflowintro",
-                "-resetcampaigntutorials", "-fullscreen", "0"]
+                "-resetcampaigntutorials", "-fullscreen", "0",
+                "-size", str(LAUNCH_SIZE[0]), str(LAUNCH_SIZE[1])]
 
 # **Every pixel layer degrades SILENTLY with the window, and the map goes
 # first.** DD's own resolution setting drifted to 853x480 mid-session -- two
@@ -132,6 +153,9 @@ FRONT_END_SCREENS = ("title", "save_select", "dlc", "modal", "difficulty",
 # seconds and the run spent fifteen iterations on it before anyone looked.
 INSTANT_SECONDS = 10.0
 INSTANT_FAILURES = 3
+#: Iterations in a row that achieve nothing (no raid, no embark, no raid
+#: end) before the night stops, however long each took.
+IDLE_FAILURES = 3
 
 KILL_TIMEOUT = 25.0
 KILL_SETTLE = 3.0
@@ -140,7 +164,23 @@ LOGS = REPO / "archive" / "logs" / "overnight"
 STOP_FILE = LOGS / "STOP"
 
 BOOT_TIMEOUT = 300.0
-PLAY_TIMEOUT = 900.0
+# **A REAL DUNGEON DOES NOT FIT IN FIFTEEN MINUTES.** 900 s was set against
+# the Old Road, which is two rooms and one corridor and finishes in about
+# seven. Measured 2026-09-20 on the second raid of a campaign -- a generated
+# crypts map, 12 areas, 4 fights planned -- the phase was cut off mid-combat
+# at the timeout with the party healthy and the route half walked:
+# `raid2-unfinished`, 411 actions, nothing wrong with any of them.
+#
+# Raising it used to be expensive, because a phase that hung also ran the full
+# allowance. It is cheap now: `STALL_LIMIT` ends a phase whose log stops
+# growing after 180 s, and `ROOM_STUCK_LINE` ends one that is printing
+# busily while getting nowhere after ~150 s. Both bound the failure, so this
+# constant only has to bound the SUCCESS -- and a short raid the bridge is
+# genuinely playing is allowed to take half an hour.
+#: 2026-09-28: 4 of 33 play phases hit 1800 s mid-raid while still moving
+#: room to room (a long Cove or Warrens map); each then paid a resume. The
+#: stall bounds above do not depend on this, so it is raised.
+PLAY_TIMEOUT = 2700.0
 LAUNCH_SETTLE = 25.0
 # How long to let the game arrive at SOME recognisable screen before acting.
 # Logos and the first loading screen match no reference, and pressing ESC into
@@ -157,11 +197,35 @@ DRY_TIMEOUT = 20.0
 # The line `run.py` prints when the party leaves a raid. Watching for it is
 # what stops each iteration burning its whole allowance after the work is done.
 RAID_OVER = "-- raid over --"
+# The other way a play phase can be finished with: `run.py` saying it has run
+# out of inputs the game accepts. Imported rather than repeated so the two
+# cannot drift -- a sentinel that has silently stopped matching is this repo's
+# characteristic bug.
+#
+# **`STALL_LIMIT` cannot see this one.** It calls a phase stalled when the log
+# stops growing, and the room re-planner prints a full block every 25 s while
+# it is stuck, so the noisiest possible failure looked like the healthiest
+# phase of the night and burned the entire 900 s allowance. Measured live
+# 2026-09-20.
+try:
+    from bridge.run import ROOM_STUCK_LINE
+except Exception:                                  # noqa: BLE001
+    ROOM_STUCK_LINE = "-- the dungeon is not responding --"
 PLAY_POLL = 3.0
 # How long nothing may happen before the iteration is written off. Generous
 # against DD's slowest animation and a torch-lit walk, and far short of the
 # 900 s allowance a stall used to burn.
 STALL_LIMIT = 180.0
+
+
+def steam_is_running() -> bool:
+    """Is a Steam client process alive? Checked before anything is clicked."""
+    try:
+        out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq steam.exe"],
+                             capture_output=True, text=True, timeout=20)
+        return "steam.exe" in (out.stdout or "").lower()
+    except Exception:                                    # noqa: BLE001
+        return True      # cannot ask: do not block a night on the check itself
 
 
 @dataclass
@@ -192,7 +256,9 @@ class Iteration:
 class Overnight:
     def __init__(self, *, model: str, dry: bool, max_iterations: int,
                  until: Optional[datetime], raids_per_campaign: int = 3,
-                 slot: int = 1, resume: bool = False, say=None):
+                 slot: int = 1, resume: bool = False,
+                 play_profile_0: bool = False, full_pack: str = "pause",
+                 survival: int = 12, say=None):
         # Flushed, because the whole point is that somebody can `tail -f` this
         # at 3am. Redirected to a file, Python buffers stdout in 8 KB blocks
         # and an eight-hour run shows nothing until it ends.
@@ -208,6 +274,33 @@ class Overnight:
         # only way forward was to delete a save on a hunch. A free slot is the
         # answer that bends no invariant.
         self.slot = int(slot)
+        # **OPT-IN, because the standing rule is the opposite.** `profile_0`
+        # is Fran's own campaign and `_profile` refuses it by default. On
+        # 2026-09-21 he handed us that exact slot to play: *"I've provided a
+        # save on the first possible profile ... lets stop restarting the
+        # save as the tutorial and the first mission on each zone is
+        # scripted"*. A flag keeps that an explicit instruction for the run
+        # that was told to do it, rather than a rule quietly deleted for
+        # every future run.
+        self.play_profile_0 = bool(play_profile_0)
+        # **WHAT TO DO WHEN THE PACK IS FULL, and the default hands off to a
+        # human who is not there.** `run.py` pauses and waits for somebody to
+        # empty a slot by hand; unattended that is a deadlock, and it is what
+        # ended two iterations on 2026-09-21 -- pack 16/16, "nothing in the
+        # pack is free to discard", six room plans and not one input. The
+        # option existed on `run.py` all along and this layer never forwarded
+        # it, so the documented escape was unreachable from a night.
+        self.full_pack = str(full_pack)
+        # **THE SURVIVAL LAYER IS OFF UNLESS ASKED FOR, AND THE NIGHT NEVER
+        # ASKED.** `run.py --survival` defaults to 0, which leaves
+        # `Advisor._rollout` as None -- so `advise_retreat` is never called,
+        # no "N combats left ... RETREAT" line is ever printed, and every
+        # layer downstream that reads that verdict is reading a blank. The
+        # bridge could not retreat in an unattended run at all. Measured
+        # 2026-09-21 on Fran's campaign: the party went four heroes -> two ->
+        # one, the last of them a Grave Robber on 3 HP at 157 stress, with
+        # three fights still routed ahead and not one retreat line in the log.
+        self.survival = max(0, int(survival))
         # RECORD ON THE CAMPAIGN THAT IS ALREADY LOADED, instead of
         # manufacturing a fresh one per iteration. Two reasons, and the
         # second is the one that forced it:
@@ -223,6 +316,15 @@ class Overnight:
         # It claims no slot and runs no teardown, because it OWNS nothing
         # -- which is exactly why it may not delete anything either.
         self.resume = bool(resume)
+        # **PLAYING profile_0 CAN ONLY MEAN CONTINUING IT.** 2026-09-23 it was
+        # run as `--play-profile-0` alone: the default boot is the NEW-campaign
+        # flow on `--slot 1`, so it clicked an empty letter, accepted the DLC
+        # screen, named a Darkest campaign and walked into the scripted Old
+        # Road -- the exact thing Fran asked never to happen again. The flag
+        # now implies `--resume --slot 0`; there is no other reading of it.
+        if self.play_profile_0:
+            self.resume = True
+            self.slot = 0
         self.until = until
         self.relaunches = 0
         self.launch_failures = 0
@@ -236,6 +338,66 @@ class Overnight:
     def _game(self):
         from bridge.window import find_window          # noqa: PLC0415
         return find_window("Darkest.exe")
+
+    def _unflip(self, win):
+        """Move the window off the monitor boundary if it is sitting on it.
+
+        Returns the moved window, or None when there was nothing to move.
+        Silent on the no-op path: this runs on every launch and a line per
+        iteration saying "not the flip case" is noise in an eight-hour log.
+        """
+        try:
+            from bridge import window as _win          # noqa: PLC0415
+            if not _win.covers_a_monitor(win):
+                return None
+            moved, why = _win.nudge_off_monitor(win)
+        except Exception as exc:                       # noqa: BLE001
+            self.say(f"  [night] could not check the window position: {exc}")
+            return None
+        if moved is None:
+            self.say(f"  [night] the window covers a monitor and could not be "
+                     f"moved: {why}")
+            return None
+        self.say(f"  [night] {why}")
+        return moved
+
+    #: How long to keep asking after a black frame, and how often.
+    WAKE_RETRY_SECONDS = 45.0
+    WAKE_RETRY_GAP = 5.0
+
+    def _wake_and_recheck(self, win, why):
+        """A black frame is a QUESTION. A SLEEPING DISPLAY is the answer that
+        costs a whole night, and it is the one nothing here could see.
+
+        Measured 2026-09-21: the 09:15 run was scored `no-game` over four
+        iterations while the game ran perfectly -- 16.9% of the GPU's 3D
+        engine, a live `title` screen, PlayFab pinging on schedule. Once the
+        display powers down a window's frames stop reaching the surface GDI
+        reads, while the DESKTOP still reads fine from its cached
+        composition, so every control the bridge had said the machine was
+        healthy. It ended when Fran moved the mouse.
+
+        `run()` now asks Windows to keep the display up for the whole night,
+        so this is the second line rather than the first: it covers a display
+        that was ALREADY down when the run started, which the request cannot
+        undo.
+        """
+        from bridge import screen                      # noqa: PLC0415
+        from bridge import window as _window           # noqa: PLC0415
+        self.say("  [night] nothing is drawing - waking the display and "
+                 "asking again before blaming the game")
+        _window.wake_display()
+        deadline = time.time() + self.WAKE_RETRY_SECONDS
+        while time.time() < deadline:
+            time.sleep(self.WAKE_RETRY_GAP)
+            try:
+                live, why = screen.display_is_live(win)
+            except Exception:                          # noqa: BLE001
+                return True, ""                        # cannot see: do not judge
+            if live:
+                self.say(f"  [night] the display came back: {why}")
+                return True, why
+        return False, why
 
     def _window_is_big_enough(self, win) -> bool:
         """Say so LOUDLY if the game came up too small, or too big, to read.
@@ -259,9 +421,20 @@ class Overnight:
         # `display_is_live` measures the thing itself: a live Darkest Dungeon
         # never holds a frame still, and it already separates a pure-black
         # flip case from a frozen desktop and names the remedy for each.
+        # **THE FLIP CASE IS RECOVERABLE AND THE LOOP NOW RECOVERS FROM IT.**
+        # A borderless window covering exactly one monitor is scanned out by
+        # DWM without passing through composition, so every GDI capture is
+        # pure black while the game runs perfectly -- and this used to end the
+        # night, because the documented remedy ("set a smaller resolution in
+        # the Video options") is a thing only a human at the keyboard can do.
+        # Moving the window off the monitor boundary costs nothing, asks the
+        # game nothing, and is checked rather than assumed below.
+        win = self._unflip(win) or win
         try:
             from bridge import screen                  # noqa: PLC0415
             live, why = screen.display_is_live(win)
+            if not live:
+                live, why = self._wake_and_recheck(win, why)
         except Exception:                              # noqa: BLE001
             live, why = True, ""                       # cannot see: do not judge
         if not live:
@@ -400,9 +573,23 @@ class Overnight:
                 self.say("  [night] the bridge cannot see the game on this "
                          "machine - attach a session and retry")
                 return False
+            # **A DUNGEON IS UNRECOGNISED BY DESIGN, and that is the state a
+            # killed iteration leaves behind.** This used to refuse here --
+            # "not pressing ESC blind" -- and burn the iteration, which is
+            # precisely wrong for the commonest cause: the previous run died
+            # mid-raid and the game is sitting in a corridor that matches no
+            # banked reference. Observed 2026-09-20 costing a whole iteration
+            # plus a relaunch.
+            #
+            # `reset.exit_to_main_menu` is NOT a blind press. It sends ESC and
+            # then REFUSES unless the recogniser names `pause_menu`, because
+            # `Exit to Desktop` is one row below the row it wants. So the
+            # blindness this guard was protecting against is already handled a
+            # layer down, by the code that knows which row is which -- and
+            # the display being live is what makes it worth asking at all.
             self.say(f"  [night] no recognisable screen after "
-                     f"{SETTLE_TIMEOUT:.0f}s - not pressing ESC blind")
-            return False
+                     f"{SETTLE_TIMEOUT:.0f}s, but the display is live - "
+                     f"asking ESC whether this is a pause menu")
         try:
             return reset.exit_to_main_menu(
                 win, act.SendInputBackend(win), say=self.say, act=not self.dry)
@@ -447,11 +634,32 @@ class Overnight:
                 self.kill_game()
                 return it
 
-            # CLAIM BEFORE CREATING. The refusal in `claim_slot` only means
-            # anything if the directory does not exist yet.
-            owned = reset.claim_slot(self.slot)
+            # **SNAPSHOT BEFORE CREATING, then own what actually appeared.**
+            # `claim_slot` predicts the slot, and DD does not agree: the save
+            # list is COMPACT, so "the row for slot N" is not a thing, and
+            # clicking the empty letter makes a campaign wherever the game
+            # feels like. Measured 2026-09-21 -- asked for slot 2 on a disk
+            # holding 0, 1, 8, 9 and got **profile_7**. The loop owned a slot
+            # that was never made, its teardown deleted nothing, and the real
+            # campaign became an orphan no later run can claim or remove.
+            # That is how BOTH of this machine's orphans were made.
+            #
+            # The safety argument is unchanged and made directly instead of
+            # by prediction: nothing that existed in `before` can ever be
+            # wrapped in an `OwnedSlot`. See `reset.claim_created`.
+            before = reset.slots_on_disk()
+            owned = None
             it.booted = self._boot(log)
-            if it.booted:
+            try:
+                owned = reset.claim_created(before)
+                if owned.slot != self.slot:
+                    self.say(f"  [night] asked for slot {self.slot}, the game "
+                             f"made slot {owned.slot} - owning what it made")
+            except reset.ResetRefused as exc:
+                # No campaign appeared. That is a boot failure, not a reason
+                # to delete anything, and it must not take the night down.
+                self.say(f"  [night] nothing to own after the boot: {exc}")
+            if it.booted and owned is not None:
                 self._campaign(log, it)
             it.outcome = ("played" if it.raids else
                           "boot-failed" if not it.booted else "no-raid-end")
@@ -461,7 +669,12 @@ class Overnight:
             # itself, so there is nothing to escalate to here; what it returns
             # is whether the GRACEFUL exit worked, which is the one check per
             # iteration that the UI was still responding.
-            if not self._teardown(owned):
+            if owned is None:
+                # Nothing was created, so there is nothing to remove -- but
+                # the game still has to go, or the next iteration inherits a
+                # half-made front end.
+                self.kill_game()
+            elif not self._teardown(owned):
                 it.note = (it.note + " " if it.note else "") + "ui-unresponsive"
         except reset.ResetRefused as exc:
             it.outcome = "refused"
@@ -536,11 +749,15 @@ class Overnight:
         from bridge import menus, screen as screen_mod    # noqa: PLC0415
         from bridge.layout import load as load_layout     # noqa: PLC0415
 
-        row = menus.campaign_row(self.slot)
-        if row is None:
-            self.say(f"  [night] no campaign in slot {self.slot} - --resume "
-                     f"plays an existing one and cannot make it")
-            return None
+        # **ASK THE SCREEN BEFORE REFUSING, because the zero-click case is the
+        # commonest one.** This used to refuse here, before looking at
+        # anything, whenever `--slot` held no campaign -- which contradicted
+        # this function's own promise that "standing in the Hamlet already
+        # satisfies it in zero clicks". Measured 2026-09-21: the game was in
+        # the Hamlet of the campaign it had been told to play, and three
+        # iterations were scored `not-loaded` over a slot number that was
+        # never going to be clicked. The refusal belongs at the save list,
+        # which is the only place the row is needed.
 
         win = self._game()
         frac = load_layout()
@@ -591,6 +808,11 @@ class Overnight:
                 continue
             unknown = 0
             if name == "save_select":
+                if menus.campaign_row(self.slot) is None:
+                    self.say(f"  [night] no campaign in slot {self.slot} - "
+                             f"--resume plays an existing one and cannot make "
+                             f"it")
+                    return None
                 if not self._click_save_row(win, frac.resolve(win),
                                             actuator.backend):
                     return None
@@ -727,9 +949,16 @@ class Overnight:
         # lost. `embark_setup` scouts the quest, seats a party from the roster
         # and then calls `to_raid` itself, so this is a strict superset rather
         # than a second path.
+        # The embark veto (bridge/embark_veto.py): the coin flip stays, a
+        # draw the survival layer would abandon at the entrance is re-drawn.
+        # Built once; `False` marks a model that would not load.
+        if getattr(self, "_veto", None) is None:
+            from bridge.embark_veto import make_veto
+            self._veto = make_veto(self.model, say=self.say) or False
         done = town.embark_setup(win, backend, self._profile(),
                                  store=self._store(), say=self.say,
-                                 act=not self.dry)
+                                 act=not self.dry,
+                                 veto=self._veto or None)
         for d in done:
             self.say(f"  [night] {d}")
         if not any(d.what == "embark" and d.confirmed for d in done):
@@ -812,10 +1041,10 @@ class Overnight:
         except SystemExit:
             return None
         if self.resume:
-            if live.name == "profile_0":
+            if live.name == "profile_0" and not self.play_profile_0:
                 self.say("  [night] the live campaign is profile_0 - that is "
-                         "Fran's own and the bridge never drives it; reading "
-                         "no town")
+                         "Fran's own and the bridge never drives it without "
+                         "--play-profile-0; reading no town")
                 return None
             if self._resumed_profile != live:
                 self._resumed_profile = live
@@ -866,10 +1095,20 @@ class Overnight:
         # The sentinel is COUNTED, not searched for. One log carries a whole
         # campaign now, so "the text is present" is true from the second raid
         # onward before the second raid has even started.
-        seen_overs = (log.read_text(encoding="utf-8", errors="replace")
-                      .count(RAID_OVER) if log.exists() else 0)
+        _before = (log.read_text(encoding="utf-8", errors="replace")
+                   if log.exists() else "")
+        seen_overs = _before.count(RAID_OVER)
+        # Counted the same way and for the same reason: one log carries a
+        # whole campaign, so "the text is present" is true from the second
+        # stall onward before the second stall has happened.
+        seen_stuck = _before.count(ROOM_STUCK_LINE)
         cmd = [sys.executable, "bridge/run.py", "--model", self.model,
-               "--log", str(log), "--duration", str(int(limit))]
+               "--log", str(log), "--duration", str(int(limit)),
+               "--full-pack", self.full_pack]
+        if self.survival:
+            cmd += ["--survival", str(self.survival)]
+        if getattr(self, "fate", False):
+            cmd += ["--fate"]
         cmd += ["--backend", "dry"] if self.dry else ["--act"]
         self.say(f"  [night] play: until '{RAID_OVER}' or {limit:.0f}s")
 
@@ -895,10 +1134,25 @@ class Overnight:
                 if proc.poll() is not None:
                     why = "exited"
                     break
-                if log.exists() and log.read_text(
-                        encoding="utf-8", errors="replace"
-                        ).count(RAID_OVER) > seen_overs:
+                text = (log.read_text(encoding="utf-8", errors="replace")
+                        if log.exists() else "")
+                if text.count(RAID_OVER) > seen_overs:
                     why = "raid over"
+                    break
+                # **Fran's pause is not a stall.** With the help card open the
+                # backend holds every input, so the dungeon stops "responding"
+                # by design -- and run 12 (2026-09-23) spent five whole
+                # iterations that way. While it is up, the clocks stop.
+                paused = self._wait_while_paused()
+                if paused:
+                    deadline += paused
+                    last_progress = time.time()
+                    seen_stuck = (log.read_text(encoding="utf-8", errors="replace")
+                                  if log.exists() else "").count(ROOM_STUCK_LINE)
+                    continue
+                if text.count(ROOM_STUCK_LINE) > seen_stuck:
+                    why = "dungeon not responding"
+                    self._bank_frame(log)
                     break
                 now_mark = self._progress_mark(log)
                 if now_mark != mark:
@@ -917,6 +1171,31 @@ class Overnight:
         self.say(f"  [night] play ended: {why}")
         self._read_log(log, it)
         it.raid_over = why == "raid over"
+
+    def _wait_while_paused(self) -> float:
+        """Block while the game's help card is open. Seconds waited, or 0.
+
+        Looked at no more than every 5 s: the watch loop spins, and a screen
+        grab per spin is a cost the pause does not need.
+        """
+        now = time.time()
+        if now - getattr(self, "_pause_checked", 0.0) < 5.0:
+            return 0.0
+        self._pause_checked = now
+        try:
+            from bridge import screen as screen_mod          # noqa: PLC0415
+            win = self._game()
+            if win is None or not screen_mod.help_card_is_up(screen_mod.grab(win)):
+                return 0.0
+            start = time.time()
+            self.say("  [night] PAUSED by the help card - the clocks are stopped")
+            while screen_mod.help_card_is_up(screen_mod.grab(win)):
+                time.sleep(2.0)
+            waited = time.time() - start
+            self.say(f"  [night] resumed after {waited:.0f}s")
+            return waited
+        except Exception:                                    # noqa: BLE001
+            return 0.0
 
     def _phase(self, cmd, timeout: float, log: Path, name: str) -> bool:
         self.say(f"  [night] {name}: {' '.join(cmd[1:3])} ...")
@@ -1036,11 +1315,71 @@ class Overnight:
 
     # ── the loop ────────────────────────────────────────────────────────
 
+    def _sweep_orphans(self) -> None:
+        """Delete campaigns a KILLED iteration left behind, before starting.
+
+        **A run that is stopped mid-raid never reaches its teardown**, so the
+        campaign survives with an unreleased claim against it. The next run
+        snapshots before booting, sees that directory as pre-existing, and
+        correctly refuses to touch it -- so it sits there forever, and the
+        save list grows a row every time. Two accumulated on this machine in
+        one day and had to be removed by hand.
+
+        `reset.orphans` reads the claim journal, which is the same proof of
+        ownership everything else here uses and is age-bounded, so a campaign
+        a human made has no entry and can never be swept. The game must be
+        closed first, which it is at this point: nothing has launched yet.
+        """
+        if self.dry:
+            return
+        from bridge import reset                       # noqa: PLC0415
+        try:
+            left = reset.orphans()
+        except Exception as exc:                           # noqa: BLE001
+            self.say(f"  [night] could not check for orphans: {exc}")
+            return
+        for owned in left:
+            try:
+                gone = reset.delete_owned(owned, game_running=False)
+            except Exception as exc:                       # noqa: BLE001
+                self.say(f"  [night] orphan slot {owned.slot} would not "
+                         f"delete: {exc}")
+                continue
+            self.say(f"  [night] swept an orphan this tool made: slot "
+                     f"{owned.slot}" + ("" if gone else " (it is still there)"))
+
     def run(self) -> int:
+        # **KEEP THE DISPLAY UP FOR THE WHOLE NIGHT.** Windows powers the
+        # monitor down on its idle timer whether or not a game is running,
+        # and a powered-down display is invisible to every check here -- see
+        # `_wake_and_recheck`. This changes nothing about Fran's power plan
+        # and is released when the process exits.
+        from bridge import window as _window           # noqa: PLC0415
+        awake = _window.keep_display_awake(True)
+        # **NO STEAM, NO CAMPAIGN -- and the failure is not a refusal, it is
+        # a NEW GAME.** With Steam closed DD does not read
+        # `userdata/<id>/262060/remote` at all; it shows a separate local save
+        # list. Measured 2026-09-23: Fran's "Darkest Tester" and "FR4" were
+        # both absent, an old local "Darkest" estate was the only campaign,
+        # and the row where his campaign had been was the EMPTY LETTER -- a
+        # load script clicked it and reached "Activate DLC", one click short
+        # of creating a campaign. Relaunching with Steam up brought his estate
+        # back at row 0, untouched.
+        if not steam_is_running():
+            self.say("refusing to start: Steam is not running. Without it the "
+                     "game reads a different save list, the campaign rows "
+                     "move, and a load can click the empty letter and start "
+                     "a new game. Start Steam and run again.")
+            return 1
         self.say(f"overnight run {self.run_id}"
                  f"{'  (DRY - nothing is sent)' if self.dry else ''}")
         self.say(f"  logs     : {LOGS}")
         self.say(f"  stop with: touch {STOP_FILE}")
+        held = ("kept awake" if awake else
+                "COULD NOT BE KEPT AWAKE - a monitor that sleeps reads as a "
+                "black frame, which is how the 2026-09-21 night was lost")
+        self.say(f"  display  : {held}")
+        self._sweep_orphans()
         n = 0
         # AN ITERATION THAT FAILS INSTANTLY IS NOT A RETRY, IT IS A LOOP.
         # Measured 2026-09-03: an unbanked results screen made `_load_campaign`
@@ -1049,6 +1388,7 @@ class Overnight:
         # game. Anything that gets as far as launching or clicking takes
         # seconds, so a run of instant failures is the same failure repeating.
         instant = 0
+        idle = 0
         while n < self.max_iterations:
             if STOP_FILE.exists():
                 self.say("  [night] STOP file present - finishing")
@@ -1066,6 +1406,19 @@ class Overnight:
                      f"{'  ' + it.note if it.note else ''}")
             self._write_summary()
             instant = instant + 1 if it.seconds < INSTANT_SECONDS else 0
+            # **The same stall, slower.** Live 2026-09-25 a stuck raid ended every
+            # iteration at 189 s with 9 actions, no raid and no embark -- over
+            # INSTANT_SECONDS, so the guard above never fired, and thirteen
+            # iterations went on one failure. Nothing achieved, repeatedly, is
+            # the same signal whatever it took to achieve it.
+            idle = (idle + 1 if (it.raids == 0 and it.embarks == 0
+                                 and it.outcome == "no-raid-end") else 0)
+            if idle >= IDLE_FAILURES:
+                self.say(f"  [night] {idle} iterations in a row ended with no "
+                         f"raid, no embark and no raid end - one failure "
+                         f"repeating. Stopping so the summary says what "
+                         f"happened.")
+                break
             if instant >= INSTANT_FAILURES:
                 self.say(f"  [night] {instant} iterations in a row failed in "
                          f"under {INSTANT_SECONDS:.0f}s - that is one failure "
@@ -1172,12 +1525,15 @@ def drop_lock() -> None:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    # THE MODS CHECKPOINT, because it is the one that LOADS. The observation
-    # is 1652 wide and the vanilla shipped checkpoint is not -- `Advisor`
-    # refuses it with one line and every combat turn of the night then has no
-    # policy behind it, while route, torch, curio and camp carry on deciding.
-    # A night that quietly plays without a combat policy looks like a working
-    # night in the summary, which is why this is a default and not a note.
+    # A NAMED SLOT, because a dated filename here goes stale in silence. Both
+    # `models/dd_combat_ppo_full_expedition*.zip` are pointers a retrain is
+    # copied into, and on 2026-09-20 they were found still holding the 1652
+    # file a day after the 1836 retrain shipped -- so `Advisor` refused on
+    # every entry point and every combat turn of every night since had no
+    # policy behind it, while route, torch, curio and camp carried on
+    # deciding. A night that quietly plays without a combat policy looks like
+    # a working night in the summary, which is why the refusal now names a
+    # checkpoint that WOULD load (`advisor.checkpoints_at_width`).
     ap.add_argument("--model",
                     default="models/dd_combat_ppo_full_expedition_mods.zip")
     ap.add_argument("--max-iterations", type=int, default=12)
@@ -1191,12 +1547,35 @@ def main(argv=None) -> int:
                          "at a free one rather than deleting anything.")
     ap.add_argument("--until", default=None,
                     help="stop after this clock time, e.g. 07:00")
+    # 48, not 12 (2026-09-25): at 12 the standard error is ~14 points, and a
+    # live ectoplasm fight read 0% -> 17% -> 0% on consecutive turns, flipping
+    # RETREAT and "worth pushing on" with nothing changed. 64 episodes cost
+    # 3s on this machine and the answer is cached per state.
+    ap.add_argument("--survival", type=int, default=48, metavar="EPISODES",
+                    help="price the retreat every room by simulating what is "
+                         "left of the dungeon this many times. 0 turns the "
+                         "survival layer off, which is `run.py`'s default and "
+                         "means the bridge can never decide to leave.")
+    ap.add_argument("--full-pack", default="pause",
+                    choices=["pause", "abandon", "swap"],
+                    help="what to do when the pack is full. `pause` waits for "
+                         "a human to free a slot, which deadlocks an "
+                         "unattended run; `abandon` leaves the rest of the "
+                         "loot behind and keeps playing.")
+    ap.add_argument("--play-profile-0", action="store_true",
+                    help="drive profile_0, which is normally refused because "
+                         "it is Fran's own campaign. He handed it over on "
+                         "2026-09-21 to be played and continued rather than "
+                         "restarted.")
     ap.add_argument("--resume", action="store_true",
                     help="play the campaign that is ALREADY loaded "
                          "instead of creating one: no boot, no claim, "
                          "no teardown, nothing deleted")
     ap.add_argument("--dry", action="store_true",
                     help="drive the whole loop, send nothing, delete nothing")
+    ap.add_argument("--fate", action="store_true",
+                    help="forward run.py --fate: read the game's next rolls off "
+                         "the save and let them veto the policy (DECOMP.md F15)")
     ap.add_argument("--force", action="store_true",
                     help="start even if something heavy is running")
     args = ap.parse_args(argv)
@@ -1227,10 +1606,14 @@ def main(argv=None) -> int:
 
 
 def _run_it(args, until) -> int:
-    return Overnight(model=args.model, dry=args.dry,
+    night = Overnight(model=args.model, dry=args.dry,
                      max_iterations=args.max_iterations, until=until,
                      raids_per_campaign=args.raids_per_campaign,
-                     slot=args.slot, resume=args.resume).run()
+                     slot=args.slot, resume=args.resume,
+                     play_profile_0=args.play_profile_0,
+                     full_pack=args.full_pack, survival=args.survival)
+    night.fate = bool(getattr(args, "fate", False))
+    return night.run()
 
 
 if __name__ == "__main__":

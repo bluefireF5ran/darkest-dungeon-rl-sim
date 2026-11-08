@@ -333,6 +333,60 @@ def test_two_real_actions_reset_the_accelerated_streak_too():
     print("  PASS test_two_real_actions_reset_the_accelerated_streak_too")
 
 
+def test_a_skill_that_does_not_target_an_ENEMY_never_invalidates_a_stall():
+    """`.is_stall_invalidating` defaults to TRUE and is written out only where
+    it is false, so a non-damaging skill that lacks the tag inherits
+    "invalidating" by omission -- and three shipped skills do exactly that.
+
+    The wiki's Talk:Stalling names them (Houndmaster's Guard Dog, Leper's
+    Revenge, Plague Doctor's Emboldening Vapours), says the game still charges
+    a stall for them, and proposes the missing condition: the skill must
+    target an enemy. Checked against the shipped files, that one test
+    reproduces every documented row -- including both of the wiki's
+    "well-known exceptions", which must survive untouched: Solo is the
+    non-damaging skill that DOES invalidate, Vulnerability Hex the damaging
+    one that does NOT.
+
+    **The bug was in the dangerous direction**: those three read as
+    invalidating, so a simulated party could dodge a stall penalty with moves
+    the real game does not accept -- and two of them are pure support, which
+    is exactly what a stalling party is casting.
+    """
+    from engine.combat_engine import CombatEngine
+    from tests._fixtures import get_store
+
+    store = get_store()
+    eng = CombatEngine.__new__(CombatEngine)
+    eng.store = store
+
+    # (hero, skill, invalidates?) -- every row the wiki documents, plus
+    # controls on each side of the two exceptions.
+    rows = [
+        ("crusader", "smite", True),                  # ordinary attack
+        ("vestal", "dazzling_light", True),           # low-damage attack
+        ("occultist", "weakening_curse", True),       # debuff that damages
+        ("jester", "solo", True),                     # EXCEPTION: -100% dmg
+        ("man_at_arms", "bellow", False),             # tagged false
+        ("occultist", "disruptive_curse", False),     # EXCEPTION: tagged false
+        ("vestal", "divine_grace", False),            # heal, tagged false
+        ("houndmaster", "guard_dog", False),          # untagged, ally-target
+        ("plague_doctor", "emboldening_vapours", False),   # untagged, ally
+        ("leper", "revenge", False),                  # untagged, self only
+    ]
+    for hero, sid, want in rows:
+        h = store.heroes.get(hero)
+        assert h is not None, f"{hero} is not in the store"
+        sk = next((s for s in h.skills if s.id == sid), None)
+        assert sk is not None, f"{hero} has no skill {sid}"
+        lvl = sk.levels.get(max(sk.levels))
+        got = CombatEngine._invalidates_stall(eng, sid, lvl)
+        assert got is want, (
+            f"{hero}/{sid}: invalidates={got}, expected {want} "
+            f"(flag={lvl.is_stall_invalidating}, "
+            f"ally={CombatEngine._is_ally_skill(eng, sid)}, "
+            f"target={getattr(lvl, 'target', None)})")
+
+
 if __name__ == "__main__":
     print("=== Reinforcements Tests ===\n")
     for name, func in sorted(globals().items()):

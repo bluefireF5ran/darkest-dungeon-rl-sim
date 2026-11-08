@@ -215,14 +215,22 @@ def advise_torch(rules: CombatRules, torch: float, torches_held: int,
         free_because = (f"a campfire is next and it restores the torch to "
                         f"{rules.camp_restore_torch:.0f}")
 
-    if gain_gold <= 0 and gain_draws <= 0:
-        return TorchAdvice(
-            torch=torch, bracket=bracket, action="hold",
-            reason="already in the darkest bracket — there is no more loot to buy",
-            gold_bonus=bottom.loot_increase_gold,
-            extra_draws=bottom.loot_increase_treasure_draws,
-            torches_held=torches_held)
-
+    # **THIS USED TO RUN FIRST, AND AT TORCH 0 IT ANSWERED THE WRONG
+    # QUESTION.** "There is no more loot to buy" is a complete answer to
+    # *should the torch go DOWN*, and no answer at all to *should it go back
+    # UP* -- but it returned before the relight branch below ever ran. So a
+    # party that had just snuffed for a kill sat at 0 with torches in the
+    # pack and was told to hold, and the next fight started pitch black:
+    # monsters +12.5 accuracy, +25% damage, +5 crit. Fran, 2026-09-20: *"try
+    # to never combat on under 75 torch, it started a combat at 0 torch"*.
+    #
+    # Measured over the whole grid of (torch, torches held) after the move:
+    # every level below the floor with a torch in the pack now says RELIGHT,
+    # and every level at or above it still says hold.
+    #
+    # It has to stay AFTER the relight branch rather than being deleted: in
+    # combat, with the killing blow due, being in the darkest bracket really
+    # is the end of the shutdown question.
     if not about_to_win:
         below_radiant = torch < RADIANT_FLOOR
         if below_radiant and torches_held > 0 and not (last_combat_of_run or camp_next):
@@ -238,6 +246,30 @@ def advise_torch(rules: CombatRules, torch: float, torches_held: int,
             torch=torch, bracket=bracket, action="hold",
             reason="the fight is not won yet; darkness is only free on the turn that ends it",
             torches_held=torches_held)
+
+    if gain_gold <= 0 and gain_draws <= 0:
+        return TorchAdvice(
+            torch=torch, bracket=bracket, action="hold",
+            reason="already in the darkest bracket — there is no more loot to buy",
+            gold_bonus=bottom.loot_increase_gold,
+            extra_draws=bottom.loot_increase_treasure_draws,
+            torches_held=torches_held)
+
+    # **A PAID shutdown is not advised any more.** Fran, PLAYBOOK 7.2
+    # (2026-09-23): *"if able and we have torches ... always be on the max
+    # light level, as it makes the game more stable and easier to plan
+    # around"*. A shutdown that has to be bought back with torches trades that
+    # stability for loot; only the FREE ones remain (the run's last fight, no
+    # fight left, a camp next -- PLAYBOOK 2.3's "last combat" rule). Live
+    # 2026-09-24 the paid version was advised sixteen times in two raids.
+    if not free_because:
+        return TorchAdvice(
+            torch=torch, bracket=bracket, action="hold",
+            reason=(f"max light while torches allow (PLAYBOOK 7.2) - the dark "
+                    f"would pay +{gain_gold:.0f}% gold here but cost "
+                    f"{needed} torch{'es' if needed != 1 else ''} to undo"),
+            gold_bonus=gain_gold, extra_draws=gain_draws,
+            torches_needed=needed, torches_held=torches_held)
 
     if not free_because and torches_held < needed:
         return TorchAdvice(

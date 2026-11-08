@@ -62,3 +62,7 @@ run_affliction_arm.out
 
 # Machine-specific Workshop paths, written by this session for convenience.
 .mod_dirs.txt
+
+# Human play recordings (bridge/recorder.py): frames and gzipped saves,
+# tens of MB per session. Evidence moves to archive/traces/ deliberately.
+archive/recordings/

@@ -91,7 +91,16 @@ def test_rarity_bias_raises_the_share_of_rare_classes():
         for hero in entry.heroes:
             if hero.hero_id:
                 slots[hero.hero_id] = slots.get(hero.hero_id, 0) + 1
-    rare = {c for c in space.classes if slots.get(c, 0) <= 20}
+    # RELATIVE, not absolute. This was `<= 20 slots`, which said nothing
+    # about the corpus once it grew: the 2026-09-19 comp sync took the
+    # pool from 178 files to 477, the rarest class went from under 20
+    # slots to 36, and "rare" became the empty set -- so the test failed
+    # claiming the corpus had FLATTENED when it had merely got bigger.
+    # The bottom quartile is what "rare" was always reaching for and it
+    # cannot be outgrown.
+    _counts = sorted(slots.get(c, 0) for c in space.classes)
+    _cut = _counts[max(0, len(_counts) // 4 - 1)] if _counts else 0
+    rare = {c for c in space.classes if slots.get(c, 0) <= _cut}
     assert rare, "no rare classes at all -- has the corpus flattened?"
 
     def share(sp, seed):

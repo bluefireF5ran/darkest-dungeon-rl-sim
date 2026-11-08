@@ -52,7 +52,21 @@ HERO_STATE_SCALARS = 56
 #
 # `data/types.py::EffectDefinition` already parses every one of these; the
 # observation was throwing them away.
-SKILL_MECHANIC_FEATURES = 45
+# v[45] is corpse clearing, APPENDED 2026-09-19 -- every index below it still
+# means what it meant, the discipline burn and the heal headroom were added
+# under. It could NOT reuse a free slot: there is none (0-17 flags and
+# magnitudes, 18-41 the two stat-bucket banks, 42 limited-use, 43 kill, 44
+# damage blocks), and reusing one would have been the SILENT break rather
+# than the loud one -- the width would still match, the shipped checkpoint
+# would still load, and it would be fed a dimension whose weights were
+# trained against a constant 0.0.
+# v[46]..v[52] APPENDED 2026-09-19 by the same audit, in one batch so the
+# width moves ONCE: torch change (signed), summon, clears-guard,
+# clears-control, unstealth, bonus action, irresistible DoT. All coarse
+# flags -- the forecast finding says a coarse NEW signal pays and every
+# refinement of a signal already present measured null, so riposte magnitude
+# and the other refinements of existing flags were deliberately left out.
+SKILL_MECHANIC_FEATURES = 53
 SKILL_SLOT_FEATURES = 20 + SKILL_MECHANIC_FEATURES
 
 # A hero rank is its state PLUS that hero's own capability payload -- the same

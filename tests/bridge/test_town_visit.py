@@ -19,6 +19,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def _vanilla_exchange(monkeypatch):
+    """These pin the VANILLA trade path; Fran's install has a mod that
+    replaces the exchange, which `choose_upgrades` rightly refuses to trade
+    through. The suite must not depend on what Steam has subscribed."""
+    import bridge.townplan as townplan
+    monkeypatch.setattr(townplan, "exchange_is_modded", lambda *_a: False)
+
 from bridge import town
 from bridge.act import OfflineWindow
 from bridge.live_state import LiveHero
@@ -106,6 +115,12 @@ def patched(monkeypatch, tutorial_town):
     # make every test in this file a test of screen recognition instead of a
     # test of the order actions happen in.
     monkeypatch.setattr(town, "_panel_is_open", lambda win: True)
+    # These are tests of the COACH visit's sequence, so the walk is the one
+    # that spends the starting wallet at the coach. Since 2026-10-12 the
+    # shipped walk puts the Guild and the Blacksmith first (Fran), and the
+    # same wallet would buy nothing here.
+    import bridge.townplan as townplan
+    monkeypatch.setattr(townplan, "UPGRADE_PRIORITY", townplan.COACH_FIRST_PRIORITY)
     return cell
 
 
@@ -133,6 +148,396 @@ def test_a_dry_visit_still_REPORTS_what_it_would_do(win, tutorial_town,
     done = _visit(win, backend, tutorial_town, monkeypatch, act=False)
     assert done, "a dry run must still say what it planned"
     assert all(not d.sent for d in done)
+
+
+# -- the hunger check, on the way home ------------------------------------
+#
+# Measured 2026-09-21 on Fran's own campaign: the raid played 379 actions,
+# the party got hungry, and `to_town` stopped dead with
+# "no move known for 'hunger'". `act.ActRunner._answer_hunger` had answered
+# that panel for weeks -- but that is the RAID layer, and this walk has its
+# own screen table.
+
+def _walk_screens(monkeypatch, screens, act=True):
+    """Drive `town.walk` over a scripted sequence of screen names."""
+    import bridge.town as town
+
+    seq = list(screens)
+    monkeypatch.setattr(town, "_look",
+                        lambda _w: seq.pop(0) if seq else "hamlet")
+    monkeypatch.setattr(town.time, "sleep", lambda *_a, **_k: None)
+    monkeypatch.setattr(town, "_await_change", lambda *_a, **_k: "")
+    monkeypatch.setattr(town, "_modal_family", lambda _w: False)
+    backend = Recorder()
+    said = []
+    walked = town.to_town(_FakeWin(), backend, say=said.append, act=act)
+    return walked, backend, said
+
+
+class _FakeWin:
+    hwnd = 1
+    client_size = (1280, 720)
+    client_origin = (0, 0)
+
+
+def test_the_walk_home_ANSWERS_the_hunger_check(monkeypatch, patched):
+    """It used to refuse here, which ended the iteration in four seconds."""
+    walked, backend, said = _walk_screens(monkeypatch, ["hunger", "hamlet"])
+    assert walked.ok, walked.why
+    assert "no move known" not in (walked.why or "")
+    assert any("eat" in s for s in said), said
+    assert backend.events, "it answered without sending anything"
+
+
+def test_it_falls_back_to_REFUSE_when_eating_did_not_take(monkeypatch,
+                                                          patched):
+    """A party with no food is offered the panel all the same, and eating is
+    then not an answer. Eat first is still right -- asking without food costs
+    nothing -- but it may not be asked twice."""
+    walked, _backend, said = _walk_screens(
+        monkeypatch, ["hunger", "hunger", "hamlet"])
+    assert walked.ok, walked.why
+    assert sum("eat" in s and "refuse" not in s for s in said) == 1, said
+    assert any("refuse" in s for s in said), said
+
+def test_the_walk_home_RETURNS_from_a_completed_quest(monkeypatch, patched):
+    """The banner of a raid the party WON. `act` presses this inside the
+    raid, but it is a modal shown once and it is still up when the walk
+    starts -- so this stopped three iterations dead on a quest that had just
+    been completed (2026-09-21)."""
+    walked, backend, said = _walk_screens(monkeypatch,
+                                          ["quest_complete", "hamlet"])
+    assert walked.ok, walked.why
+    assert "no move known" not in (walked.why or "")
+    assert any("quest_complete" in s for s in said), said
+    assert backend.events, "it returned without sending anything"
+
+
+def test_the_walk_home_closes_ANY_building_panel(monkeypatch, patched):
+    """A run stopped mid-town-visit leaves a building panel open, and the
+    walk met a screen it had no move for -- three iterations dead in under
+    ten seconds each (2026-09-22). Every panel closes by the same X, so the
+    suffix covers the guild, abbey and tavern without a reference each."""
+    walked, backend, said = _walk_screens(
+        monkeypatch, ["stage_coach_panel", "hamlet"])
+    assert walked.ok, walked.why
+    assert "no move known" not in (walked.why or "")
+    assert any("close stage_coach_panel" in s for s in said), said
+    assert backend.events
+
+# -- reading the party bar, and the quest click that hit nothing ------------
+
+def test_an_empty_party_slot_is_FLAT_and_a_filled_one_is_not(monkeypatch):
+    """**"The bar did not change" could never tell an empty slot from a
+    failed drag**, and the difference is a raid: heroes left on the bar are
+    not drawn in the roster list, so their seats are refused and the party
+    goes out short.
+
+    Measured 2026-09-22 on the estate map, same slots, filled then emptied:
+    empty reads mean 15.2 / std 7.9 (identical across all four -- it is frame
+    art), occupied reads mean 32.5-74.5 / std 42.0-69.5. The STD is the
+    discriminator because a dark portrait and a lit frame can share a mean.
+    """
+    import numpy as np
+    import bridge.town as town
+    import bridge.screen as screen_mod
+
+    assert 8.0 < town.PARTY_SLOT_TEXTURE < 42.0, (
+        "the threshold has to sit between the measured empty and filled")
+
+    flat = np.full((720, 1280, 3), 15, dtype=np.uint8)
+    noisy = np.random.RandomState(0).randint(0, 255, (720, 1280, 3), "uint8")
+
+    class _Res:
+        win = _FakeWin()
+
+        @staticmethod
+        def at(_frac):
+            return (200, 200)
+
+    monkeypatch.setattr(screen_mod, "grab", lambda _w: flat)
+    assert town.party_slot_filled(_FakeWin(), _Res(), 0) is False
+    monkeypatch.setattr(screen_mod, "grab", lambda _w: noisy)
+    assert town.party_slot_filled(_FakeWin(), _Res(), 0) is True
+    monkeypatch.setattr(screen_mod, "grab", lambda _w: None)
+    assert town.party_slot_filled(_FakeWin(), _Res(), 0) is None
+
+
+def test_the_frame_threshold_sits_between_the_measured_noise_and_signal():
+    """Measured on the estate map: idle drift 0.023, a click on empty map
+    0.042, a click on a quest emblem 1.247 (the left panel redraws)."""
+    import numpy as np
+    import bridge.town as town
+
+    assert 0.042 < town.FRAME_SAME < 1.247
+    a = np.zeros((40, 40, 3))
+    assert town._frames_match(a, a.copy()) is True
+    assert town._frames_match(a, a + 2.0) is False
+    assert town._frames_match(a, np.zeros((10, 10, 3))) is False
+
+# -- which hero is on which roster row, ASKED rather than inferred ----------
+
+def test_learn_roster_rows_asks_the_SAVE_who_arrived(monkeypatch):
+    """**Every way of inferring the row is broken on this install.** The list
+    order is not the save's -- measured 2026-09-22, Ceauce is save index 5
+    and draws at row 3 -- and the portrait matcher that used to recover it
+    compares against art `Amara's Character UI` replaces.
+
+    So it runs an experiment instead: drag a row onto the bar, read
+    `persist.roster.json` to see whose `in_party` just turned on, put them
+    back. The save is the one channel the mods cannot touch. Live, this
+    recovered all eight rows and the party seated 4 of 4 for the first time.
+    """
+    import bridge.town as town
+
+    seated = {"who": None}
+    seq = iter([8, 7, 27])
+
+    def _in_party(_profile):
+        return set() if seated["who"] is None else {seated["who"]}
+
+    class _Backend:
+        def drag(self, src, dst):
+            # Dragging TO the bar seats the next hero; back to the list frees it.
+            seated["who"] = next(seq, None) if dst == ("BAR",) else None
+            return True
+
+    class _Res:
+        win = _FakeWin()
+
+        @staticmethod
+        def at(frac):
+            return ("BAR",) if frac == ("PARTY0",) else ("ROW",)
+
+    monkeypatch.setattr(town, "_in_party", _in_party)
+    monkeypatch.setattr(town, "party_slot_filled", lambda *_a: False)
+    monkeypatch.setattr(town.time, "sleep", lambda *_a: None)
+    monkeypatch.setattr(town, "_park_row", lambda _t: 7)
+    monkeypatch.setattr(town, "_Snapshot", lambda _p: None)
+    # `TL` is imported inside the function, so the real module is the seam.
+    import bridge.townlayout as TL
+
+    monkeypatch.setattr(TL, "party_portrait", lambda i: ("PARTY0",))
+    monkeypatch.setattr(TL, "roster_portrait", lambda r: ("ROW",))
+
+    got = town.learn_roster_rows(_FakeWin(), _Backend(), _Res(), "prof",
+                                 rows=[0, 1, 2], say=lambda _s: None, act=True)
+    assert got == {0: 8, 1: 7, 2: 27}
+
+
+def test_it_learns_NOTHING_when_not_armed(monkeypatch):
+    """It sends drags, so the dry gate has to hold."""
+    import bridge.town as town
+
+    assert town.learn_roster_rows(None, None, None, "prof",
+                                  say=lambda _s: None, act=False) == {}
+
+def test_learn_roster_positions_pages_past_the_eight_drawn_rows(monkeypatch):
+    """A roster of 18 hides ten heroes below the drawn eight -- measured
+    2026-09-23, every seat fell back to row 7 and the bar took 3 of 4. Each
+    click down reveals ONE new hero at row 7, so position is `7 + clicks`; a
+    swallowed click re-reveals a known hero and must not advance the count.
+    """
+    import types
+
+    import bridge.act as act_mod
+    import bridge.town as town
+
+    heroes = [f"g{i}" for i in range(11)]
+    state = {"top": 0, "swallow": {2}}          # the 2nd click is swallowed
+    sent = {"n": 0}
+
+    monkeypatch.setattr(town, "_Snapshot",
+                        lambda _p: types.SimpleNamespace(heroes=heroes))
+    monkeypatch.setattr(town, "force_roster_to_top",
+                        lambda *a, **k: town.Did("top", sent=True,
+                                                 confirmed=True))
+    monkeypatch.setattr(act_mod, "plan_scroll_roster",
+                        lambda down, res: types.SimpleNamespace(actionable=True))
+    monkeypatch.setattr(town.time, "sleep", lambda _s: None)
+
+    def _send(_b, _plan, **_k):
+        sent["n"] += 1
+        if sent["n"] not in state["swallow"]:
+            state["top"] = min(state["top"] + 1, len(heroes) - 8)  # list end
+
+    def _rows(*_a, rows=None, **_k):
+        rows = range(8) if rows is None else rows
+        # g9 is BUSY (in a building): it cannot be dragged, so the probe
+        # learns nothing -- but the list still moved.
+        return {r: heroes[state["top"] + r] for r in rows
+                if heroes[state["top"] + r] != "g9"}
+
+    monkeypatch.setattr(town, "_roster_strip", lambda *_a: state["top"])
+    monkeypatch.setattr(town, "_bar_moved", lambda a, b: a != b)
+
+    monkeypatch.setattr(town, "_send", _send)
+    monkeypatch.setattr(town, "learn_roster_rows", _rows)
+    got = town.learn_roster_positions(None, None, None, "prof",
+                                      say=lambda _s: None, act=True)
+    assert got["g0"] == (0, 0) and got["g7"] == (0, 7)
+    assert got["g8"] == (1, 7) and got["g10"] == (3, 7)
+    assert "g9" not in got and len(got) == 10
+
+
+def _dismiss_rig(monkeypatch, roster, page, vanish):
+    """`roster`: guids alive; `page`: {row: guid}; `vanish(guid)`: what the
+    save drops when the Yes goes in for that guid."""
+    import types
+
+    import bridge.act as act_mod
+    import bridge.town as town
+
+    state = {"alive": set(roster), "opened": None}
+
+    class _Backend:
+        def click(self, pt):
+            if pt == "YES" and state["opened"] is not None:
+                state["alive"] -= vanish(state["opened"])
+            return True
+
+    class _Res:
+        modal_ok = "YES"
+
+        @staticmethod
+        def at(frac):
+            return frac
+
+    class _Actuator:
+        def __init__(self, **_k):
+            pass
+
+        def execute(self, plan):
+            state["opened"] = plan.steps[0].screen
+            return True
+
+    monkeypatch.setattr(act_mod, "Actuator", _Actuator)
+    monkeypatch.setattr(town.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(town, "DISMISS_WITNESS_S", 0.05)
+    monkeypatch.setattr(town, "learn_roster_rows",
+                        lambda *_a, **_k: {r: g for r, g in page.items()
+                                           if g in state["alive"]})
+    monkeypatch.setattr(town, "_Snapshot", lambda _p: types.SimpleNamespace(
+        heroes=[types.SimpleNamespace(guid=g) for g in state["alive"]]))
+    import bridge.townlayout as TL
+    monkeypatch.setattr(TL, "roster_portrait", lambda row: page[row])
+    return town, _Backend(), _Res(), state
+
+
+def test_dismiss_only_the_probed_hero_and_confirm_by_the_save(monkeypatch):
+    town, backend, res, state = _dismiss_rig(
+        monkeypatch, roster={1, 2, 3}, page={0: 1, 1: 2, 2: 3},
+        vanish=lambda g: {g})
+    got = town.dismiss_heroes(None, backend, res, "p", [2, 3], act=True,
+                              say=lambda _s: None)
+    assert [d.confirmed for d in got] == [True, True]
+    assert state["alive"] == {1}
+
+
+def test_dismiss_STOPS_when_the_save_drops_someone_else(monkeypatch):
+    """Irreversible: a dismissal that removed the wrong hero is not repeated."""
+    town, backend, res, state = _dismiss_rig(
+        monkeypatch, roster={1, 2, 3}, page={0: 1, 1: 2, 2: 3},
+        vanish=lambda g: {1})
+    got = town.dismiss_heroes(None, backend, res, "p", [2, 3], act=True,
+                              say=lambda _s: None)
+    assert len(got) == 1 and not got[0].confirmed
+
+
+def test_dismiss_leaves_a_hero_that_is_not_on_the_page(monkeypatch):
+    town, backend, res, state = _dismiss_rig(
+        monkeypatch, roster={1, 2, 9}, page={0: 1, 1: 2}, vanish=lambda g: {g})
+    assert town.dismiss_heroes(None, backend, res, "p", [9], act=True,
+                               say=lambda _s: None) == []
+    assert 9 in state["alive"]
+
+
+def _sort_rig(monkeypatch, list_order, file_order=None):
+    """A roster of 12 in FILE order g0..g11 with stress 10*i, and a list whose
+    drawn order after the n-th click is `list_order(n)`."""
+    import types
+
+    import bridge.town as town
+
+    heroes = [types.SimpleNamespace(guid=g, stress=float(g * 10))
+              for g in (file_order or range(12))]
+    clicks = {"n": 0}
+
+    class _Backend:
+        def click(self, _pt):
+            clicks["n"] += 1
+            return True
+
+    class _Res:
+        @staticmethod
+        def at(frac):
+            return frac
+
+    def _rows(*_a, rows=None, **_k):
+        drawn = list_order(clicks["n"])
+        return {r: drawn[r] for r in (rows if rows is not None else range(8))}
+
+    monkeypatch.setattr(town.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(town, "_Snapshot",
+                        lambda _p: types.SimpleNamespace(heroes=heroes))
+    monkeypatch.setattr(town, "force_roster_to_top",
+                        lambda *a, **k: town.Did("top", sent=True, confirmed=True))
+    monkeypatch.setattr(town, "learn_roster_rows", _rows)
+    return town, _Backend(), _Res(), clicks
+
+
+def test_the_file_order_IS_the_list_so_nothing_is_clicked(monkeypatch):
+    """The game saves the roster in its displayed order (2026-09-24), so with
+    no sort click since the last save the list is the file order: two probes
+    confirm it and every position comes from the save."""
+    town, backend, res, clicks = _sort_rig(monkeypatch, lambda n: list(range(12)))
+    got = town.sort_roster_low_stress_first(None, backend, res, "p",
+                                            act=True, say=lambda _s: None)
+    assert clicks["n"] == 0
+    assert got[0] == (0, 0) and got[7] == (0, 7) and got[11] == (4, 7)
+
+
+def test_the_stress_sort_reads_its_direction_off_the_list(monkeypatch):
+    """A list that is not the file order is sorted by Stress. The first click
+    here lands most-stressed first, so it clicks again and confirms the
+    least-stressed-first order, predicted as a stable sort of the file."""
+    file_order = [3, 0, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11]
+
+    def drawn(n):
+        if n == 0:
+            return [1, 0] + file_order[2:]    # not the file order: a click is needed
+        return sorted(range(12), reverse=n % 2 == 1)
+
+    town, backend, res, clicks = _sort_rig(monkeypatch, drawn, file_order)
+    got = town.sort_roster_low_stress_first(None, backend, res, "p",
+                                            act=True, say=lambda _s: None)
+    assert clicks["n"] == 2
+    assert got[0] == (0, 0) and got[7] == (0, 7)
+    assert got[8] == (1, 7) and got[11] == (4, 7)
+
+
+def test_the_predicted_order_is_a_STABLE_stress_sort_of_the_file(monkeypatch):
+    """Measured live 2026-09-23: 17 rows at equal stress were file indexes
+    11-27 in order. Ties keep file order; stress sorts low first."""
+    import types
+
+    import bridge.town as town
+
+    file_order = [types.SimpleNamespace(guid=g, stress=st) for g, st in
+                  ((574, 0.0), (569, 30.0), (570, 0.0), (572, 0.0), (577, 30.0))]
+    monkeypatch.setattr(town, "_Snapshot",
+                        lambda _p: types.SimpleNamespace(heroes=file_order))
+    assert town.predicted_order("p") == [574, 569, 570, 572, 577]
+    assert town.predicted_order("p", +1) == [574, 570, 572, 569, 577]
+    assert town.predicted_order("p", -1) == [569, 577, 574, 570, 572]
+
+
+def test_a_list_that_does_not_match_the_prediction_falls_back(monkeypatch):
+    """A drawn order the save cannot explain means the walk, not a guess."""
+    town, backend, res, _clicks = _sort_rig(
+        monkeypatch, lambda n: [5, 1, 2, 3, 4, 0, 6, 7, 8, 9, 10, 11][::-1])
+    assert town.sort_roster_low_stress_first(None, backend, res, "p",
+                                             act=True, say=lambda _s: None) == {}
 
 
 # -- the order ------------------------------------------------------------

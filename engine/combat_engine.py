@@ -60,6 +60,12 @@ class CombatEngine(MonsterAIMixin, BuffMixin, EffectsMixin, AfflictionMixin, Dot
         self.heroes: list[CombatantState] = []
         self.enemies: list[CombatantState] = []
         self.round: int = 0
+        #: Deathblow rolls over this engine's LIFE -- `reset()` leaves it, so
+        #: a caller can diff it across a combat transition. Instrumentation
+        #: and the `--dd-exposure-penalty` arm; nothing in combat reads it.
+        self.deathblow_rolls: int = 0
+        self.deaths_door_entries: int = 0
+        self.deathblow_deaths: int = 0
         self.turn_order: list[CombatantState] = []
         self.current_turn_index: int = 0
         self.stall_counter: int = 0
@@ -555,9 +561,11 @@ class CombatEngine(MonsterAIMixin, BuffMixin, EffectsMixin, AfflictionMixin, Dot
         dmg_min, dmg_max = 1, 1
         if ed.skills and ed.skills[0].levels:
             lv = next(iter(ed.skills[0].levels.values()))
-            if lv.atk_dmg_min is not None:
+            # Truthy, not `is not None`: a first skill at `.dmg 0 0` now
+            # loads as 0, and the opening band stays the 1-1 it always was.
+            if lv.atk_dmg_min:
                 dmg_min = lv.atk_dmg_min
-            if lv.atk_dmg_max is not None:
+            if lv.atk_dmg_max:
                 dmg_max = lv.atk_dmg_max
         return CombatantState(
             id=100 + len(self.enemies), definition_id=ed.id, is_hero=False, name=ed.name,
@@ -1002,12 +1010,19 @@ class CombatEngine(MonsterAIMixin, BuffMixin, EffectsMixin, AfflictionMixin, Dot
                 # straight back on it, which would skip the deathblow roll a
                 # hero already on Death's Door owes for a net-negative turn
                 # and double-fire enter/exit side effects.
+                hp_before_ticks = combatant.hp
                 self._tick_heal_dots(combatant)
                 self._tick_dots(combatant)
                 self._tick_stress_dots(combatant)
                 if combatant.hp > 0 and combatant.is_deaths_door:
                     self._recover_from_deaths_door(combatant)
-                self._check_deaths_door_dot(combatant)
+                # The game rolls a deathblow only on DAMAGE taken
+                # (`Actor::vf50`: a hit at or under 0 damage survives), so
+                # a hero resting on Death's Door with nothing ticking owes
+                # no roll at its turn start. Unguarded, every such hero
+                # rolled 33% each turn it took (changelog 2026-10-11).
+                if combatant.hp < hp_before_ticks or not combatant.is_deaths_door:
+                    self._check_deaths_door_dot(combatant)
                 self._check_win_loss()
                 if self.done:
                     return
@@ -1171,6 +1186,18 @@ class CombatEngine(MonsterAIMixin, BuffMixin, EffectsMixin, AfflictionMixin, Dot
         corpse_positions = sorted({p for e in self.enemies if e.is_corpse
                                    for p in e.occupied_positions})
         ally_positions = [h.position for h in self.heroes if h.is_alive() and h.id != hero_id]
+        # **A stealthed enemy cannot be picked out by a single-target skill**
+        # (Fran, 2026-09-28) -- the same rule the monster side has always had
+        # for stealthed heroes (`_monster_ai`), which the hero side lacked:
+        # a Brigand Fusilier, Crone or Fishman Shaman that stealthed itself
+        # stayed a legal single target. AoE still hits it, a skill with
+        # `ignore_stealth` (Tracking Shot) still picks it, and when EVERY
+        # living enemy is stealthed the rule lifts, as the monster side's does.
+        living = [e for e in self.enemies if e.is_alive()]
+        stealthed_positions = {p for e in living if e.is_stealthed
+                               for p in e.occupied_positions}
+        if living and all(e.is_stealthed for e in living):
+            stealthed_positions = set()
         valid = []
         for sk_id in skill_ids:
             sd = skill_data_map.get(sk_id)
@@ -1223,6 +1250,11 @@ class CombatEngine(MonsterAIMixin, BuffMixin, EffectsMixin, AfflictionMixin, Dot
                 # re-resolved to nothing at execution, silently burns the turn.
                 target_pool = [pos for pos in target_pool
                                if self._is_burning_at(pos)]
+            if (stealthed_positions and not sd.is_aoe
+                    and not self._is_ally_skill(sk_id)
+                    and not getattr(sd, "ignore_stealth", False)):
+                target_pool = [pos for pos in target_pool
+                               if pos not in stealthed_positions]
             candidates = sorted(set(p - 1 for p in sd.target if (p - 1) in target_pool))
             if not candidates:
                 continue
@@ -1572,6 +1604,14 @@ class CombatEngine(MonsterAIMixin, BuffMixin, EffectsMixin, AfflictionMixin, Dot
             # One to-hit roll for the whole skill use, compared against each
             # target's own chance -- see _shared_hit_roll.
             shared_hit_roll = self._shared_hit_roll(targets)
+            # `self.fate` is the GAME's known draws for this hero action
+            # (bridge/fate.py, DECOMP.md F15). None everywhere but the live
+            # advisor's look-ahead, so the stream below is untouched by default.
+            fate = getattr(self, "fate", None) if performer.is_hero else None
+            if fate is not None:
+                shared_hit_roll = fate.hit_roll
+                self.fate = None                     # one action's worth only
+            first_target = True
             for target in targets:
                 if target.is_corpse:
                     # Damage and nothing else. A corpse cannot be guarded
@@ -1594,8 +1634,12 @@ class CombatEngine(MonsterAIMixin, BuffMixin, EffectsMixin, AfflictionMixin, Dot
                 damage_mult = self._compute_mark_damage_mult(performer, target, skill_data)
                 acc_bonus = (self.consecutive_misses.get(performer.id, 0) *
                              self.rules.consecutive_miss_reduction_acc_buff)
+                known = fate is not None and first_target
+                first_target = False
                 result = resolve_attack(performer, target, skill_data, self.rules, self.rng,
-                                          damage_mult, acc_bonus, hit_roll=shared_hit_roll)
+                                          damage_mult, acc_bonus, hit_roll=shared_hit_roll,
+                                          crit_roll=fate.crit_roll if known else None,
+                                          damage_u=fate.damage_u if known else None)
                 self._vlog_attack(performer, target, action.skill_id, skill_data, result)
 
                 if result.hit:
@@ -2111,8 +2155,51 @@ class CombatEngine(MonsterAIMixin, BuffMixin, EffectsMixin, AfflictionMixin, Dot
         # invalidating) actions per round to avoid the round counting
         # toward a stall — see _check_stall. Hero-only (this is a
         # party-behavior check, not something enemy actions factor into).
-        if performer.is_hero and skill.is_stall_invalidating:
+        if performer.is_hero and self._invalidates_stall(skill_id, skill):
             self._stall_invalidating_actions_this_round += 1
+
+    def _invalidates_stall(self, skill_id: str, skill: SkillLevelData) -> bool:
+        """Does using this skill count toward the two that reset the stall?
+
+        **The shipped flag alone gets three skills wrong, and it gets them
+        wrong in the dangerous direction** -- they read as invalidating, so
+        the simulated party could dodge a stall penalty with moves the real
+        game does not accept.
+
+        `.is_stall_invalidating` defaults to TRUE and is written out only
+        where it is false, so a skill that is non-damaging AND lacks the tag
+        inherits "invalidating" by omission. The wiki's Talk:Stalling page
+        names the three the game overrides anyway -- Houndmaster's Guard Dog,
+        Leper's Revenge, Plague Doctor's Emboldening Vapours -- and proposes
+        the missing condition: **the skill must target an enemy.** Checked
+        against the shipped files, that single test reproduces every
+        documented row:
+
+        | skill | flag | ally | target | active? |
+        |---|---|---|---|---|
+        | ordinary attack | True (default) | no | enemies | **yes** |
+        | Jester `solo` (-100% dmg) | True (default) | no | enemies | **yes** |
+        | MaA `bellow` (-100% dmg) | **False** | no | enemies | no |
+        | Occultist `disruptive_curse` (-90%) | **False** | no | enemies | no |
+        | HM `guard_dog` | True (default) | **yes** | allies | no |
+        | PD `emboldening_vapours` | True (default) | **yes** | allies | no |
+        | Leper `revenge` | True (default) | no | **none (self)** | no |
+
+        Both of the wiki's two "well-known exceptions" survive untouched:
+        Solo is the non-damaging skill that DOES invalidate (it targets the
+        enemy side and carries no tag), and Vulnerability Hex is the damaging
+        one that does NOT (its tag is explicitly false).
+
+        The enemy test is two conditions because self-targeting and
+        ally-targeting are different things in this loader:
+        `_is_ally_skill` reads the `@` in the raw `.target` notation, and a
+        pure self-buff like Revenge has an EMPTY target list instead.
+        """
+        if not skill.is_stall_invalidating:
+            return False
+        if self._is_ally_skill(skill_id):
+            return False
+        return bool(getattr(skill, "target", None))
 
     def _is_valid_mode(self, performer: CombatantState, skill: SkillLevelData) -> bool:
         if skill.valid_modes and "human" in skill.valid_modes and "beast" in skill.valid_modes:
@@ -2223,6 +2310,7 @@ class CombatEngine(MonsterAIMixin, BuffMixin, EffectsMixin, AfflictionMixin, Dot
             return
 
         if not target.is_deaths_door:
+            self.deaths_door_entries += 1
             target.is_deaths_door = True
             target.hp = max(target.hp, 0)
             self.log.append(f"{target.name} is at Death's Door!")
@@ -2239,12 +2327,14 @@ class CombatEngine(MonsterAIMixin, BuffMixin, EffectsMixin, AfflictionMixin, Dot
             # modifications would theoretically reach higher values."
             capped_resist = min(target.death_blow_resist, DEATHBLOW_RESIST_CAP)
             effective_chance = self.rules.deathblow_chance - capped_resist
+            self.deathblow_rolls += 1
             db_roll = self.rng.random()
             self.vlog(f"      [DEATHBLOW] {target.name} at Death's Door: base "
                       f"{self.rules.deathblow_chance:.0%} - DEATHBLOW RES "
                       f"{capped_resist:.0%}(cap {DEATHBLOW_RESIST_CAP:.0%}) = {effective_chance:.0%} to die | "
                       f"roll {db_roll:.3f} => {'DIES' if db_roll < effective_chance else 'SURVIVES'}")
             if db_roll < effective_chance:
+                self.deathblow_deaths += 1
                 target.is_dead = True
                 target.hp = 0
                 self.log.append(f"{target.name} has died!")

@@ -179,9 +179,16 @@ def test_a_fires_edge_comp_resolves_every_one_of_its_heroes(store):
     SILENTLY and the comp evaluated as a 3-hero party -- the exact failure
     `modded_hero_comp_names` exists to catch for fan-made classes, except
     these two really do load."""
-    loadout = store.comp_loadouts.get("Iron Shackles: Burn")
-    if loadout is None:
-        pytest.skip("the curated Fire's Edge comp is not present")
+    # BY SHAPE, and it RAISES rather than skipping. This looked the comp up
+    # as "Iron Shackles: Burn" and skipped when it was missing, so the
+    # 2026-09-19 re-export renamed it to "Creeping Rot: Mercy" and this
+    # test simply stopped running -- green, silent, and checking nothing.
+    # That is the failure `tests/suite/` exists for, so a missing shape is
+    # now an error: a Crusader/Abomination/Runaway/Plague Doctor comp is
+    # the premise, and if the corpus loses it the test must say so.
+    from tests._fixtures import comp_with_classes
+    loadout = comp_with_classes("crusader", "abomination", "runaway",
+                                "plague_doctor", store=store)
     assert [h.hero_id for h in loadout.heroes] == [
         "crusader", "abomination", "runaway", "plague_doctor"]
     runaway = next(h for h in loadout.heroes if h.hero_id == "runaway")

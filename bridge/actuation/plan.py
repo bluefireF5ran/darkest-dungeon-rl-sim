@@ -21,7 +21,15 @@ from .keys import VK_1, VK_2, VK_3, VK_4, VK_5, VK_A, VK_CONTROL, VK_D, VK_ESCAP
 
 @dataclass(frozen=True)
 class Step:
-    """One primitive input. `kind` is "key", "click" or "drag"."""
+    """One primitive input. `kind` is "key", "keys", "click", "rclick" or
+    "drag".
+
+    `rclick` is the right button, and it is a separate KIND rather than a flag
+    on `click` so that every existing plan, test and count keeps meaning what
+    it meant. The game needs it for one thing the bridge could not do at all:
+    *"While interacting with an object: [RIGHT-CLICK] an inventory item to
+    apply it to the object"* (`[pc]str_help_raid_room_6`).
+    """
     kind: str
     vk: int = 0                              # key
     # `keys`: several held down TOGETHER for `hold`, released in reverse.

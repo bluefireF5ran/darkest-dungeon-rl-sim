@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from tests._fixtures import get_store
+from tests._fixtures import comp_with_classes, get_store
 
 from data.camping_loader import CampingLoader, FIREWOOD_PER_BAND
 from engine.combat_engine import CombatEngine
@@ -33,13 +33,18 @@ from data.paths import CSV_DIR as _CSV_DIR
 CSV_DIR = str(_CSV_DIR)
 
 store = get_store()
-COMP = "Blood Money: Volley"
+# The SHAPE, not the name. This file pinned `COMP = "Blood Money: Volley"`
+# and the 2026-09-19 re-export renamed it to "Steady Nerves: Melee", killing
+# eleven tests here on a KeyError before any of them asserted anything --
+# the third re-export to do this (see `comp_with_classes` for the other two).
+# The shape is what these tests actually need and it survives a rename.
+COMP_CLASSES = ("abomination", "arbalest", "bounty_hunter", "crusader")
 
 
 def _party(hp_stress):
     """A live party from a real comp, beaten down to a given state."""
     eng = CombatEngine(store, SeededRNG(7))
-    loadout = store.comp_loadouts[COMP]
+    loadout = comp_with_classes(*COMP_CLASSES, store=store)
     hero_ids = [h.hero_id for h in loadout.heroes]
     eng.reset(hero_defs=[store.heroes[h] for h in hero_ids],
               enemy_defs=[store.enemies["fishman_harpoon_B"]])
@@ -165,14 +170,35 @@ def test_class_restricted_skills_never_fire_on_the_wrong_hero():
 
 
 def test_camp_skills_resolve_positionally_for_duplicate_class_comps():
-    """"Curious Coin: Sand" fields two Antiquarians whose camp skills genuinely
-    differ. A hero_id-keyed dict collapses them onto whichever was inserted
-    last — a bug this repo has already hit twice for skills and trinkets."""
-    loadout = store.comp_loadouts["Curious Coin: Sand"]
-    classes = [h.hero_id for h in loadout.heroes]
-    assert classes.count("antiquarian") == 2
-    kits = [tuple(h.camp_skill_ids) for h in loadout.heroes if h.hero_id == "antiquarian"]
-    assert kits[0] != kits[1], "the two Antiquarians should have different camp skills"
+    """A hero_id-keyed dict collapses two heroes of one class onto whichever
+    was inserted last -- a bug this repo has already hit twice, for skills and
+    for trinkets.
+
+    This used to pin "Curious Coin: Sand" by NAME and died on the 2026-09-19
+    re-export like the rest of the file. It now FINDS its own case: any comp
+    fielding two heroes of one class whose camp kits genuinely differ. That is
+    the condition the test needs, so searching for it is both more honest than
+    a name and immune to the next rename. 15 comps qualify today.
+    """
+    import collections
+
+    for name in sorted(store.comp_loadouts):
+        loadout = store.comp_loadouts[name]
+        ids = [h.hero_id for h in loadout.heroes if h.hero_id]
+        for cls, n in collections.Counter(ids).items():
+            if n < 2:
+                continue
+            kits = [tuple(h.camp_skill_ids) for h in loadout.heroes
+                    if h.hero_id == cls]
+            if len(set(kits)) > 1:
+                assert kits[0] != kits[1], (name, cls)
+                print(f"  PASS test_camp_skills_resolve_positionally "
+                      f"({name!r}, {cls} x{n})")
+                return
+    raise AssertionError(
+        "no comp fields two heroes of one class with differing camp kits -- "
+        "the positional-resolution bug can no longer be observed, so this "
+        "test would pass vacuously")
 
 
 def test_requirements_gate_effects():

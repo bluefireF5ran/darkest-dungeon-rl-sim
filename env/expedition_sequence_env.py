@@ -82,6 +82,11 @@ HUNGER_STARVE_FRACTION = 0.20
 # run -- well under 9 means the stock is meant to be bought partially and this
 # is too high.
 HUNGER_CHECK_CHANCE = 0.6
+# **Superseded by the game's own map budgets (2026-09-25).** The falsifier
+# above is answerable from `scripts/map_generator.darkest`, which ships the
+# range of hunger tiles and fights per map: 0.36 / 0.40 / 0.26 checks per fight
+# for short / medium / long, well under 0.6. `_hunger_chance` uses that; this
+# constant is the fallback when the game file cannot be read.
 
 # DELIBERATE EATING. `rules.json`'s `provision_hp_heal` (0.05) is what a hero
 # restores by eating, and until now nothing in this simulator ever spent food
@@ -312,6 +317,17 @@ REWARD_TRUNCATION = -20.0
 # the number so a sweep can answer it instead of this comment guessing.
 AFFLICTION_PENALTY_DEFAULT = 0.0
 
+# **A deathblow roll is charged where it happens** (Fran, 2026-10-12, "Train
+# it", on docs/NEXT.md item 3). After the 2026-10-11 engine fix every roll
+# kills at the rate the resist says, and a downed hero still takes 0.86
+# rolls per Death's Door entry against Fran's 0 deaths in 9 entries: the gap
+# is EXPOSURE, a downed hero left where it can be hit. REWARD_HERO_DEATH
+# prices that only as a one-in-three -50 lottery per roll; this charges every
+# roll itself, a deterministic price on the exposure. A NON-potential term,
+# like `affliction_penalty`: it moves the optimum, which is the point. 0.0 is
+# byte-identical to every archived checkpoint.
+DD_EXPOSURE_PENALTY_DEFAULT = 0.0
+
 # combats-remaining (as a fraction AND on an absolute scale), alive fraction,
 # mean party stress, + 4 provision counts.
 EXPEDITION_CONTEXT_FEATURES = 8
@@ -403,6 +419,7 @@ class ExpeditionSequenceEnv(ExpeditionEnv):
                  boss_quest_p: float = 0.0, hold_out_classes=frozenset(),
                  stress_weight: float = 1.0,
                  affliction_penalty: float = AFFLICTION_PENALTY_DEFAULT,
+                 dd_exposure_penalty: float = DD_EXPOSURE_PENALTY_DEFAULT,
                  slot_permute: bool = False, hard_focus: bool = False,
                  allow_abandon: bool = True, blind_forecast: bool = False,
                  prevention_reward: bool = False,
@@ -425,6 +442,7 @@ class ExpeditionSequenceEnv(ExpeditionEnv):
                          boss_quest_p=boss_quest_p,
                          hold_out_classes=hold_out_classes)
         self.affliction_penalty = float(affliction_penalty)
+        self.dd_exposure_penalty = float(dd_exposure_penalty)
         # A scripted expedition, replayed on every reset instead of sampling
         # one. SB3 calls `reset()` with no options, so a pinned scenario has to
         # live on the env rather than be passed per episode. The dict is
@@ -668,6 +686,14 @@ class ExpeditionSequenceEnv(ExpeditionEnv):
         stress_ok = max(0.0, 1.0 - stress / END_STRESS_SCALE)
         return max(0.0, min(1.0, W_END_HP * hp_frac + W_END_STRESS * stress_ok))
 
+    def _hunger_chance(self) -> float:
+        """Hunger checks per completed fight, from the game's map budgets for
+        this run's length band; `HUNGER_CHECK_CHANCE` if they cannot be read."""
+        from data.map_generator import hunger_per_fight   # noqa: PLC0415
+        from data.paths import GAME_DIR as _GD            # noqa: PLC0415
+        rate = hunger_per_fight(self._length_band, str(_GD))
+        return HUNGER_CHECK_CHANCE if rate is None else rate
+
     def _built_districts(self):
         """Which districts this expedition is treated as having built.
 
@@ -697,7 +723,7 @@ class ExpeditionSequenceEnv(ExpeditionEnv):
             reserve = 0
         else:
             remaining = max(0, self._num_combats - self._combat_idx - 1)
-            reserve = int(round(remaining * HUNGER_CHECK_CHANCE * len(alive)))
+            reserve = int(round(remaining * self._hunger_chance() * len(alive)))
         # `max_provisions_before_full` is per HERO, and one meal here feeds
         # every living hero one food, so it bounds the meals at this stop.
         cap = int(getattr(self.store.rules, "max_provisions_before_full",
@@ -912,6 +938,14 @@ class ExpeditionSequenceEnv(ExpeditionEnv):
             self._original_camp_skill_ids = [list(s) for s in explicit_camp_skills]
 
         self._enemy_script = [str(n) for n in (options.get("enemy_comp_names") or [])]
+        # **The REAL fights ahead, when the caller knows them** (2026-09-25):
+        # every battle tile in `persist.map.json` carries a `mash_index` into
+        # the zone's mash table, fixed when the map was generated -- verified
+        # 10/10 against captured raids. The live survival forecast passes the
+        # remaining groups here, so it simulates the dungeon it is in rather
+        # than random draws from the zone pool. Fights past the list (a camp
+        # ambush) are sampled as before.
+        self._enemy_groups = [list(g) for g in (options.get("enemy_group_script") or [])]
 
         # Decided ONCE per expedition, before any combat is drawn: a boss quest
         # is a property of the quest, not a coin flipped at the last room.
@@ -930,7 +964,7 @@ class ExpeditionSequenceEnv(ExpeditionEnv):
             if self._original_hero_skill_ids is not None else None
         )
         entry = (self._scripted_enemy(0) if self._enemy_script
-                 else self._draw_encounter(0))
+                 else self._grouped_enemy(0) or self._draw_encounter(0))
         # Kept because a RETREAT does not consume the encounter -- see
         # _start_next_combat's `entry=`. Re-drawing would send the party back
         # into the room it just fled and find different monsters in it.
@@ -1001,6 +1035,22 @@ class ExpeditionSequenceEnv(ExpeditionEnv):
             raise ValueError(f"no enemy comp named {name!r} in the loaded data")
         return entry
 
+    def _grouped_enemy(self, combat_idx: int):
+        """The known enemy group for this combat, or None to sample.
+
+        An id no loaded monster answers to is None too, so the fight is
+        sampled rather than built from nothing."""
+        if combat_idx >= len(getattr(self, "_enemy_groups", ()) or ()):
+            return None
+        from data.types import EnemyCompEntry                   # noqa: PLC0415
+        ids = self._enemy_groups[combat_idx]
+        known = getattr(self.store, "enemies", None)
+        if not ids or (known is not None and any(i not in known for i in ids)):
+            return None
+        return EnemyCompEntry(zone_id=self._zone_id, zone_name=self._zone_id,
+                              tier=self._tier, category="hall", chance=1.0,
+                              enemy_ids=list(ids), name=None)
+
     def _hp_targets(self, carry_over):
         """Intended HP per living hero, or None to leave HP untouched.
 
@@ -1065,7 +1115,23 @@ class ExpeditionSequenceEnv(ExpeditionEnv):
             if self._original_trinkets_and_quirks:
                 trinket_ids, quirk_ids = self._original_trinkets_and_quirks[orig_idx]
                 if trinket_ids or quirk_ids:
+                    # A HERO AT FULL HP STAYS AT FULL -- the same rule the
+                    # district branch below already applies, and for the same
+                    # reason: a trinket or quirk that raises max_hp is permanent
+                    # equipment already in force when the raid begins, not a
+                    # mid-combat buff that must not heal.
+                    #
+                    # `hp_targets` covered this on the REAL-PARTY path and is
+                    # None on the sampled one, so training never got the fix.
+                    # It went unnoticed because no sampled comp fielded a hero
+                    # whose own kit moved the ceiling until the 2026-09-19
+                    # team-builder sync: a four-Jester comp then opened its
+                    # fourth Jester at 35/42, every combat, compounding across
+                    # the expedition exactly as the district bug did.
+                    was_full = hero.hp >= hero.max_hp
                     self.engine.apply_trinkets_and_quirks(hero, trinket_ids, quirk_ids)
+                    if was_full:
+                        hero.hp = hero.max_hp
             # Districts last the whole campaign, so they belong here with the
             # gear and the trinkets rather than anywhere per-combat -- and
             # BEFORE hp_targets, because `districts_training_ring_2` is a
@@ -1181,7 +1247,7 @@ class ExpeditionSequenceEnv(ExpeditionEnv):
         # comparison after it.
         hunger_off = hunger_disabled(self.store.districts, self._built_districts())
         if (completed and not hunger_off
-                and self.engine.rng.random() < HUNGER_CHECK_CHANCE):
+                and self.engine.rng.random() < self._hunger_chance()):
             alive = sum(1 for h in self.engine.heroes if h.is_alive())
             have = self._provision_inventory.get("food", 0)
             if have >= alive:
@@ -1352,7 +1418,8 @@ class ExpeditionSequenceEnv(ExpeditionEnv):
         carry_over = [self._carry_over_by_index[i] for i in self._alive_indices]
         if entry is None:
             entry = (self._scripted_enemy(self._combat_idx) if self._enemy_script
-                     else self._draw_encounter(self._combat_idx))
+                     else self._grouped_enemy(self._combat_idx)
+                     or self._draw_encounter(self._combat_idx))
         if torch is None:
             torch = (self._scripted_torch if self._scripted_torch is not None
                      else self._sample_torch_level())
@@ -1466,6 +1533,7 @@ class ExpeditionSequenceEnv(ExpeditionEnv):
         if int(action) == ACTION_ABANDON and self._can_abandon():
             return self._abandon()
         dead_before = {h.id for h in self.engine.heroes if h.is_dead}
+        rolls_before = self.engine.deathblow_rolls
         phi_exp_before = self._compute_expedition_potential()
 
         obs, reward, terminated, truncated, info = super().step(action)
@@ -1547,6 +1615,10 @@ class ExpeditionSequenceEnv(ExpeditionEnv):
         # `_alive_indices` is what makes the ledger stable: it maps this
         # combat's hero slot to the ORIGINAL roster index, which survives a
         # party re-pack after a death. A hero id would not.
+        # Read after the transition block too, and for the same reason: the
+        # next combat's auto-resolved enemy turns can roll a deathblow.
+        if self.dd_exposure_penalty:
+            reward -= self.dd_exposure_penalty * (self.engine.deathblow_rolls - rolls_before)
         if self.affliction_penalty:
             for slot, hero in enumerate(self.engine.heroes):
                 if not hero.is_afflicted or slot >= len(self._alive_indices):

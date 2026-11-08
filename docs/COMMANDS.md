@@ -65,6 +65,9 @@ python eval_expedition.py --model <ckpt> --full-expedition --all-comps --episode
 python eval_expedition.py --model <ckpt> --episodes 100 --comps 5 --comp-seed 0
 python tools/summarize_eval.py archive/logs/eval_6M.log archive/logs/eval_wikifix_3M.log
 
+# Which bosses kill, and whether in the boss fight or before it (--all-comps scenarios).
+python tools/boss_report.py --model <ckpt> --episodes 600 --workers 4
+
 # Paired A/B with a bootstrap CI and exact McNemar.
 python tools/ab_compare.py --a <ckptA> --b <ckptB> --episodes 6 --comps 12 --comp-seed 1
 python tools/ab_compare.py --a <ckpt> --self-check      # must print all zeros
@@ -115,6 +118,13 @@ python tools/retreat_audit.py --explain 13:23:03
 python tools/exchange_rates.py
 python tools/class_visibility.py --mods "<root>;<root>" --json out.json
 python tools/journal_report.py --differs
+
+# Recording a human session (bat\record_play.bat): inputs only while the game
+# is focused, a frame per press, every changed save. See bat/README.md.
+python bridge/recorder.py --selftest              # the input hook delivers
+python bridge/recorder.py                         # record until the game closes
+python tools/recording_report.py [SESSION] [--clicks] [--marks]
+python tools/recording_report.py --unpack DIR     # then run.py --replay DIR
 ```
 
 ## The comp search
@@ -129,13 +139,39 @@ python tools/comp_leaderboard.py --model <ckpt> --tier 5 --band medium --episode
 python tools/compose_class_comps.py --from-gate out.json --count 4
 ```
 
+## The campaign simulator
+
+```bash
+# The ruler: 40 campaigns x 60 weeks, paired by seed; run both blocks (0, 40).
+python -m campaign.run --campaigns 40 --weeks 60 --workers 6 --seed 0 \r
+    --gear-budget 0.5 --jsonl archive/logs/campaign/SW_<tag>_s0.jsonl
+# One campaign told as a story (F3); --best picks it from a ruler run.
+python -m campaign.chronicle --best archive/logs/campaign/SW_v8_g0.5_s0.jsonl \r
+    --out archive/logs/campaign/chronicle_v8_s0.md
+
+# The F2 learning curve: every shipped version, world vs decision steps
+python -m campaign.curve --png docs/figures/campaign_curve.png
+```
+
+Experiment knobs (defaults are the shipped rules): `--boss-margin`,
+`--max-underleveled`, `--max-gap`, `--coach-first` (the v8 building order;
+smith first is shipped), `--no-sanitarium`, `--discount-cap`,
+`--no-quest-quirks`. See `docs/CAMPAIGN_SIM.md`.
+
+```bash
+# Death's Door per checkpoint (E22): entries, rolls, deaths per entry, paired
+python tools/deaths_door_eval.py --models models/a.zip,models/b.zip --episodes 1200
+# The training knob it judges: charge P per deathblow roll (0 = every archived checkpoint)
+python train.py --full-expedition ... --dd-exposure-penalty 10 --out models/<name>.zip
+```
+
 ## The bridge — against the running game
 
 Launch the game **windowed and smaller than the monitor**
 (`-fullscreen 0 -size 1280 720`), with **Steam running**.
 
 ```bash
-python bridge/run.py --model models/dd_combat_ppo_full_expedition_mods.zip --survival 12
+python bridge/run.py --survival 12   # models/dd_combat_ppo_full_expedition.zip
 python bridge/run.py --replay archive/traces/raidsnaps2       # validate the marking offline
 python bridge/run.py --boot --act                             # front end -> new campaign -> tutorial
 python bridge/overlay.py --model <ckpt> --log run1.log
@@ -175,6 +211,12 @@ python tools/pe_anchors.py --sections
 python tools/pe_anchors.py --rtti --grep Battle
 python tools/pe_anchors.py --key cutoffAlwaysMiss
 python tools/pe_anchors.py --telemetry
+python tools/ghidra_export.py --key cutoffAlwaysMiss   # refuses if exe and program differ
+python tools/ghidra_export.py --all               # decompile every function (~10 min)
+python tools/ghidra_diff.py D:/ghidra/out/e95ff9f0 D:/ghidra/out/d83a6d57
+python tools/decomp_lookup.py --fn Battle::ApplyHit --callers --callees
+python tools/rules_audit.py                   # every rules.json key against the parser
+python tools/damage_oracle.py --list          # F9: paired damage draws vs HP lost (needs record_play_full)
 
 python tools/dbwin_capture.py --selftest      # always, before trusting a negative result
 python tools/dbwin_capture.py --probe --process Darkest.exe --out trace.log --duration 600
@@ -209,3 +251,34 @@ the env side.
 python tools/doc_migration_audit.py           # did the docs lose anything?
 python tools/safe_run.py -- <any long command>
 ```
+
+### The transcription oracle (`tools/pizzarat_oracle.py`)
+
+Grades the engine's parsed monster data against an independent community
+transcription of the same game files. Found the missing enemy `.launch`
+filter on 2026-09-19. Exits non-zero on a disagreement that is not already
+adjudicated in `KNOWN_SITE_ERRORS`; adjudicate a new one against the
+monster's own `.info.darkest`, never against the site.
+
+```bash
+python tools/pizzarat_oracle.py                 # grade every field
+python tools/pizzarat_oracle.py --field launch  # one field only
+python tools/pizzarat_oracle.py --verbose       # every disagreement
+python tools/pizzarat_oracle.py --refresh DIR   # re-extract from the .js
+```
+
+See `docs/COMMUNITY_GUIDES.md`.
+
+### The unread-key audit (`tools/monster_key_audit.py`)
+
+Every key the monster files ship against every key the code mentions. Fails
+when the game carries a field nobody has classified -- the guard that would
+have caught `shared_health`.
+
+```bash
+python tools/monster_key_audit.py
+python tools/monster_key_audit.py --all
+python tools/monster_key_audit.py --carriers does_count_towards_stall_penalty
+```
+
+See `docs/COMMUNITY_GUIDES.md` and `ASSUMPTIONS.md`.

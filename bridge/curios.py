@@ -195,14 +195,29 @@ def _effect_value(name: str) -> float:
 
 
 def _quirk_value(name: str) -> float:
-    if name.lower() == "positive":
-        return 1.0
-    if name.lower() == "negative":
-        return -1.0
-    quirk = _quirks().get(name)
+    """A quirk outcome's worth, from PizzaRat's tiers (`data/quirk_tiers.py`).
+
+    **Not +-1 any more.** Fran, PLAYBOOK 7.5 (2026-09-23): *"quirk change is
+    neutral although i would argue is slightly bad as the pool of quirks that
+    you can get is more bad than good"*. A random "positive" is the mean
+    value of the positive pool, which is mostly low tiers. A random
+    "negative" is the mean of the negative pool. A named quirk is its own
+    tier. So a curio's quirk roll scores as what it is likely to hand over.
+    """
+    from data.quirk_tiers import quirk_value     # noqa: PLC0415
+    library = _quirks()
+    lowered = name.lower()
+    if lowered in ("positive", "negative"):
+        want = lowered == "positive"
+        pool = [q for q, rec in library.items()
+                if bool(rec.get("is_positive")) == want]
+        fallback = 0.2 if want else -0.5
+        vals = [quirk_value(q, fallback) for q in pool]
+        return sum(vals) / len(vals) if vals else (0.5 if want else -1.0)
+    quirk = library.get(name)
     if quirk is None:
         return 0.0
-    return 1.0 if quirk.get("is_positive") else -1.0
+    return quirk_value(name, 0.5 if quirk.get("is_positive") else -0.5)
 
 
 def result_value(result_type: str, result: Result) -> float:

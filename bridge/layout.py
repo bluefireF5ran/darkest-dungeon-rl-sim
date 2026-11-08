@@ -329,7 +329,18 @@ def _design(x: float, y: float) -> tuple[float, float]:
     return (x / _D[0], y / _D[1])
 
 
+# **THE DIAL, MEASURED LIVE AND CONFIRMED BY THE GAME'S OWN TOOLTIP
+# (2026-09-21).** Read off a raid frame at 1280x720: the flame dial at the
+# centre of the light bar sits at (641, 80). A CTRL+SHIFT click there walked
+# the light 93 -> 68 -> 43 -> 18 -> 0 across four clicks, each one announced
+# by DD itself -- `RADIANT LIGHT ( 93 )`, `SHADOWY ( 43 )`,
+# `BLACK AS PITCH ( 0 )`. That readout is the acknowledgement the save cannot
+# give: it still said 68 while the screen said 0, because `persist.raid.json`
+# is written per TURN.
+TORCH_DIAL = (641.0 / 1280, 80.0 / 720)
+
 TORCH_CANDIDATES = (
+    ("dial (measured live 2026-09-21)", TORCH_DIAL),
     ("meter (measured, refuted at 20ms)", TORCH_METER),
     ("flame (measured, refuted at 20ms)", TORCH_FLAME),
     ("flamepos", _design(960, 100)),
@@ -350,6 +361,29 @@ TORCH_CANDIDATES = (
 # neighbouring row quits to desktop, which is why `PAUSE_EXIT_TO_DESKTOP`
 # has a test saying nothing may click it.
 RAID_ABANDON_QUEST = (52.0 / 1280, 90.0 / 720)
+
+# The red WAX SEAL above that scroll, and it is a different control.
+# Fran, 2026-09-21, watching the bridge click the scroll and achieve nothing:
+# *"do not click the scroll, click the red symbol"*.
+#
+# Measured on the live frame at 1280x720: the seal is the round crest at the
+# very top left, spanning roughly x 33-77 and y 28-72, so its centre is
+# (55, 50) with about 22 px of slack in every direction. Verified by clicking
+# it with the quest complete -- the game went straight to `raid_results`
+# within two seconds.
+#
+# **It is NOT the retreat X and must not be confused with it.**
+# `RAID_ABANDON_QUEST` is what `plan_retreat` clicks INSIDE a fight, and that
+# is documented by the game's own `[pc]str_help_raid_combat_4`. This one ends
+# the RAID from the quest banner, out of combat. Clicking the scroll below it
+# does nothing at all: tested with a six-second watch and the frame never
+# moved beyond its own animation.
+#
+# And it takes NO confirm when the objective is met -- the results page comes
+# straight up. `ActRunner._leave_raid` therefore confirms only if a modal
+# actually appears, rather than sending `MODAL_OK` into whatever is drawn
+# next.
+RAID_QUEST_SEAL = (55.0 / 1280, 50.0 / 720)
 
 # ── the front end: title -> save slot -> DLC -> difficulty -> loading ──
 #
@@ -652,6 +686,15 @@ class ResolvedLayout:
         advances a summary the player has already earned.
         """
         return self._pt(*RAID_RESULTS_NEXT)
+
+    @property
+    def raid_quest_seal(self) -> tuple[int, int]:
+        """The red wax seal on the quest banner: ends the raid, out of combat.
+
+        Distinct from `raid_abandon_quest`, which is the scroll under it and
+        is the in-combat retreat control. See `RAID_QUEST_SEAL`.
+        """
+        return self._pt(*RAID_QUEST_SEAL)
 
     @property
     def raid_abandon_quest(self) -> tuple[int, int]:

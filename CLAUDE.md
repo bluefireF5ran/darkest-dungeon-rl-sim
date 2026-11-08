@@ -19,13 +19,16 @@ What stays here is what applies to *every* task.
 | `<dir>/CLAUDE.md` | **The contracts for that directory** — `engine/`, `env/`, `data/`, `bridge/`, `tools/`, `tests/`. Loaded automatically when you touch that subtree. Read the one for the code you are changing; most of its rules exist because the first version got it wrong. |
 | `CLAUDE.md` (this) | Orientation, the cross-cutting rules, and where everything lives. |
 | `docs/findings/` | **The lab notebook**, by subject, with `INDEX.md` carrying one line per finding and its verdict (`shipped` / `null` / `harmful` / `retracted` / `open`). Read the verdict before re-running an experiment — three of them are already settled in the negative. |
+| `docs/CAMPAIGN_SIM.md` | **The closing arc** (2026-10-10): the campaign simulator, its fixed scope, phases and stop date. Night work follows it. |
 | `docs/NEXT.md` | **The pending queue.** Agreed work not started, each item with its evidence, its first command and its falsifier. Read it when a session opens with "what's next". |
 | `docs/CHANGELOG.md` | Why the code is the way it is — real bugs found, game-data evidence, rationale per convention. Split by month under `docs/changelog/`. **Read before changing engine behaviour.** |
 | `docs/BRIDGE.md` | The full `bridge/` reference. **Required reading before changing anything under `bridge/`**; `bridge/CLAUDE.md` is the summary. |
 | `docs/DECOMP.md` | What the game's **code** says, and how we know: the pinned binary and its hash, the anchor table, one entry per finding recovered from `Darkest.exe`. A formula here outranks the wiki and matches the data files. |
 | `docs/PLAYBOOK.md` | **The decision spec.** An expert player's criteria, interviewed 2026-08-14. Game files outrank it on anything numeric; it outranks everything on *what to do* with those numbers. |
+| `docs/COMMUNITY_GUIDES.md` | Third-party guides, triaged: what they add, what the repo already had, and where they contradict the PLAYBOOK. **Game files outrank it; PLAYBOOK outranks it on what to DO.** |
 | `docs/WIKI_MECHANICS.md` | Condensed wiki mechanics. **Game files still outrank it.** |
 | `docs/COMMANDS.md` | Every runnable command in one place. |
+| `docs/REPORT.md` | **The portfolio report (draft, F3).** Methods and this project's own numbers only -- never the game's code or data. |
 | `archive/docs/*` | **Historical and stale.** Never "fix" behaviour to match them. |
 | `README.md`, `AGENTS.md` | Orientation only. |
 
@@ -76,6 +79,9 @@ bridge/                        the player: reads the RUNNING game and says what
                                menus, mappanel, mapicons, curiopanel, obstacles,
                                actionbar, heropanel, townlayout, townplan)
                                — see bridge/CLAUDE.md and docs/BRIDGE.md
+campaign/                      the campaign simulator: weeks, Hamlet, quest
+                               board around the combat sim -- see
+                               campaign/CLAUDE.md and docs/CAMPAIGN_SIM.md
 tools/                         diagnostics, oracles, rulers, and one search
                                — see tools/CLAUDE.md
 models/                        the live checkpoints
@@ -200,12 +206,21 @@ python train.py --check                              # gymnasium API compliance
 python eval_expedition.py --model <ckpt> --full-expedition --all-comps --episodes 4
 
 # The bridge, against the running game.
-python bridge/run.py --model models/dd_combat_ppo_full_expedition_mods.zip --survival 12
+python bridge/run.py --survival 12   # the named slot; see below
 python bridge/run.py --replay archive/traces/raidsnaps2   # validate offline
 
 # Did the docs lose anything?
 python tools/doc_migration_audit.py
 ```
+
+**`models/dd_combat_ppo_full_expedition.zip` is a POINTER, and a retrain has
+to be copied into it.** Every bridge entry point defaults to it, so a retrain
+that only updates the docs leaves the player with no combat policy — which is
+what happened between 2026-09-19 and 2026-09-20, silently, because `Advisor`
+refuses a wrong-width checkpoint and everything else carries on deciding. The
+refusal now names a checkpoint that WOULD load
+(`advisor.checkpoints_at_width`). Promote, then check:
+`python -c "from bridge.advisor import Advisor; print(Advisor(model_path='models/dd_combat_ppo_full_expedition.zip').model_refused or 'loads')"`
 
 **A short run WITHOUT `--smoke` overwrites the live checkpoint AND
 `logs/<mode>/best_model.zip`.** `models/` is gitignored, so git cannot restore

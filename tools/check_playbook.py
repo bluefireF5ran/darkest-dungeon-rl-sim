@@ -5,8 +5,11 @@ an expert player says is correct". Each check below names a PLAYBOOK.md rule and
 reports the number that would falsify it. Read-only: no training, no writes.
 
   3.2  heal only in extreme situations or in stall
-  3.3  with a kill already secured, the hero acting first spends its turn on
-       heal / stress-heal instead of piling on
+  3.3  IN A STALL, with a kill already secured, the hero acting first spends
+       its turn on heal / stress-heal instead of piling on. The stall is part
+       of the criterion ("En stall, si X está aturdido...") and leaving it out
+       scored correct out-of-stall attacks as violations -- corrected
+       2026-09-20, so figures from before that are not comparable
   3.4  stalling is conditional on the comp actually having a healer or
        stress-healer to stall FOR
   3.5  buffs pay off in long fights; how long are our fights?
@@ -205,7 +208,27 @@ def main() -> None:
                         recovery_turns_in_healerless_comps += 1
 
                 # --- 3.3: the kill is secured; is the free turn spent well? ---
-                if all_stunned and base._party_needs_recovery():
+                #
+                # **THE STALL IS THE GATE, and this measured without it.**
+                # The criterion opens "En stall, si X está aturdido y va a
+                # morir a manos de Y o Z" -- the recover-instead-of-pile-on
+                # advice is scoped to a stall the game is letting the party
+                # have. Fran, 2026-09-20: *"the recover part only matters
+                # when you are stalling properly per se, not whenever every
+                # enemy is stunned."*
+                #
+                # `_party_needs_recovery()` is only ONE of the three gates in
+                # `is_recovery_phase()`; the other two are the enemy count and
+                # `_stall_is_still_cheap()`. Without them this counted turns
+                # where the party was NOT stalling -- and outside a stall,
+                # attacking is correct play, because the point is to end the
+                # fight. So every one of those turns was scored as a
+                # violation for doing the right thing.
+                #
+                # The number this printed before the fix is NOT comparable
+                # with the number after it: the situation being counted
+                # changed, not the policy.
+                if all_stunned and in_recovery:
                     secured_actions[cat] += 1
 
                 # --- DOT / CRP: what the bundle claims to have made possible ---
@@ -296,7 +319,7 @@ def main() -> None:
     print(f"  cheap turns granted to comps with no healer AND no stress-healer: "
           f"{recovery_turns_in_healerless_comps}\n")
 
-    print("PLAYBOOK 3.3 — kill secured (every living enemy stunned) + party needs recovery")
+    print("PLAYBOOK 3.3 — IN A STALL, kill secured (every living enemy stunned)")
     t = sum(secured_actions.values())
     if not t:
         print("  situation never arose\n")

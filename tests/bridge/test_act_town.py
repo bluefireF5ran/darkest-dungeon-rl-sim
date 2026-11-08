@@ -75,19 +75,39 @@ def test_a_MEASURED_building_has_a_plan(resolved, name):
 
 @pytest.mark.parametrize("name", [n for n in townlayout.BUILDINGS
                                   if n not in townlayout.BUILDING_SCENE_POINTS])
-def test_an_UNMEASURED_building_refuses(resolved, name):
-    """The lesson from the first live town visit, as a rule.
+def test_an_UNMEASURED_building_goes_VIA_THE_COACH(resolved, name):
+    """The lesson from the first live town visit, kept -- and no longer a
+    dead end.
 
     `building_button` derives the navigation strip's button perfectly, and the
-    strip **is not drawn on the Hamlet** -- DD puts it inside a building panel.
-    Clicking the derived point opened nothing and the visit then sent six more
-    clicks into an open town. So a building whose scene point has not been
-    MEASURED must refuse, not fall back to the derivable-but-wrong one.
+    strip **is not drawn on the Hamlet** -- DD puts it inside a building
+    panel. Clicking the derived point opened nothing and the visit then sent
+    six more clicks into an open town. So the strip may never be the FIRST
+    click, which is what this now pins.
+
+    What changed on 2026-09-21 is that refusing outright was costing the
+    campaign: the Guild has no scene point, so every skill unlock the embark
+    plan had already budgeted for was skipped, and the party embarked
+    carrying a comp whose skills it had never been given. Opening the stage
+    coach -- the one measured scene point -- and hopping along the strip
+    reaches it in two clicks, verified live.
     """
+    plan = plan_open_building(name, resolved)
+    assert plan.actionable, name
+    assert len(plan.steps) == 2, [s.label for s in plan.steps]
+    first, second = plan.steps
+    coach = resolved.at(townlayout.building_scene_point("stage_coach"))
+    assert first.screen == coach, "the strip must never be the FIRST click"
+    assert second.screen == resolved.at(townlayout.building_button(name))
+
+
+@pytest.mark.parametrize("name", ["nonesuch", ""])
+def test_a_building_that_does_not_EXIST_still_refuses(resolved, name):
+    """The fallback is for a building with no scene point, not for a name
+    that names nothing -- a guessed coordinate costs whatever is under it."""
     plan = plan_open_building(name, resolved)
     assert not plan.actionable, name
     assert plan.steps == ()
-    assert "measured" in plan.refusal
 
 
 def test_the_measured_buildings_are_at_distinct_points(resolved):

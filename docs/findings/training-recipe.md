@@ -228,3 +228,39 @@ teaches is not worth what it costs in practice on curated comps.
 Defaults stay 0.0. `--class-balance` also stays, unmeasured on its own — the
 bundle cannot say which of the three did the damage, and decomposing it is
 four more experiments across two seeds (~17 hours).
+
+
+## `--boss-quest-p 0.25`: it wins where it trained, not in a campaign (2026-10-10)
+
+The shipped recipe plus `--boss-quest-p 0.25`, 12M, seed 0 (146 min,
+`models/boss25_s0.zip`, log `archive/logs/train_boss25_s0_20261010.log`).
+The 2026-10-06 attempt at the same thing died at 660k steps and left nothing.
+
+**The N2 rulers say ship it** (`--all-comps --episodes 2`, same engine for both):
+
+| band | corridor shipped -> boss25 | `--boss-quests` shipped -> boss25 |
+|---|---|---|
+| short | 97.8 -> 97.9 | 87.0 -> 89.5 |
+| medium | 96.0 -> 96.9 | 83.1 -> 87.1 |
+| long | 85.8 -> 88.1 | 72.2 -> 79.5 |
+
+**The campaign simulator says no** (`docs/CAMPAIGN_SIM.md`, E6): +9.3 and
++9.5 dead per 60-week campaign on two seed blocks (3.3 and 4.2 SE), +3 wipes.
+
+Two instruments disagreeing, so the same 540 campaign raids (95 bosses) were
+replayed under both models:
+
+| raids as | deaths/raid shipped -> boss25 | boss success shipped -> boss25 |
+|---|---|---|
+| played (campaign heroes) | 1.17 -> 1.27 (+0.11 +- 0.08) | 20% -> 21% |
+| best gear for their level | 0.79 -> 0.89 | **61%** -> 57% |
+| the training world (level, gear, kit, trinkets) | 0.10 -> 0.08 | 81% -> 85% |
+
+**The gain is real in the world it trained in and does not transfer** to the
+undergeared, underlevelled parties a campaign actually fields, where it
+presses on and loses more heroes. And the campaign's boss losses are not the
+policy's at all: the SAME shipped policy wins 61% instead of 20% once the
+heroes have the gear their level allows. The lever is the Hamlet's gold, not
+the combat model. One training seed: a second would be needed before
+claiming anything about boss exposure in general.
+

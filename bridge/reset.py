@@ -91,6 +91,10 @@ class OwnedSlot:
     claimed_at: float
 
 
+
+# Screens where ESC closes an overlay rather than opening the pause menu.
+ESC_STEPS_BACK = ("hamlet", "estate_map")
+
 def journal_for(save_root: Path) -> Path:
     """The claim journal that describes `save_root`.
 
@@ -217,6 +221,101 @@ def _open_claim(target: Path, journal: Path,
         return OwnedSlot(slot=int(e["slot"]), path=target,
                          claimed_at=claimed)
     return None
+
+
+def slots_on_disk(save_root: Path = SAVE_ROOT) -> frozenset[int]:
+    """Which `profile_<n>` directories exist right now."""
+    out = set()
+    for d in Path(save_root).glob(PROFILE_GLOB):
+        tail = d.name.rsplit("_", 1)[-1]
+        if d.is_dir() and tail.isdigit():
+            out.add(int(tail))
+    return frozenset(out)
+
+
+def orphans(save_root: Path = SAVE_ROOT, journal: Optional[Path] = None,
+            max_age: float = ADOPT_MAX_AGE) -> list[OwnedSlot]:
+    """Slots this tool created, still on disk, and never released.
+
+    **An interrupted iteration leaves a campaign nobody can clean up.**
+    `claim_created` owns what a boot makes, and releases it at teardown -- but
+    a run that is killed mid-raid never reaches the teardown, so the directory
+    survives with an unreleased claim against it. The next run snapshots
+    before booting, sees that directory as pre-existing, and correctly refuses
+    to touch it. Two of those accumulated on this machine in a day and had to
+    be removed by hand.
+
+    The journal already holds the proof of ownership and `_open_claim`
+    already reads it, expiry and all -- this is only the sweep nobody had
+    written. Same guarantee as everywhere else here: a campaign a human made
+    has no journal entry and can never come back from this.
+
+    Newest first, so a caller that deletes them in order frees the most
+    recently abandoned slot first.
+    """
+    root = Path(save_root)
+    book = Path(journal) if journal is not None else journal_for(root)
+    found, seen = [], set()
+    for e in reversed(_read_journal(book)):
+        path = Path(str(e.get("path") or ""))
+        if path in seen or not path.is_dir():
+            continue
+        seen.add(path)
+        try:
+            _require_save_shape(path, root)
+        except Exception:                                  # noqa: BLE001
+            continue                                       # a different world
+        owned = _open_claim(path, book, max_age)
+        if owned is not None:
+            found.append(owned)
+    return found
+
+
+def claim_created(before: frozenset[int], save_root: Path = SAVE_ROOT,
+                  journal: Optional[Path] = None) -> OwnedSlot:
+    """Own the slot the game ACTUALLY created, given what existed before.
+
+    **`claim_slot` predicts the slot and Darkest Dungeon does not agree.**
+    The save list is COMPACT -- one row per campaign with the holes closed up
+    -- so "the row for slot N" is not a thing, and clicking the empty letter
+    makes a campaign wherever the game feels like. Measured 2026-09-21: the
+    boot asked for slot 2, on a disk holding profiles 0, 1, 8 and 9, and DD
+    created **profile_7**. The loop then owned a slot that was never made, its
+    teardown deleted nothing, and `profile_7` joined `profile_1` as an orphan
+    no later run can claim or remove.
+
+    Observing beats predicting here, and it is not a weaker safety argument
+    but the same one made directly. `OwnedSlot`'s guarantee is *"a directory
+    that existed before we started can never be wrapped in one of these"* --
+    `claim_slot` enforces it by refusing an existing path, and this enforces
+    it by construction, against a snapshot taken before the campaign was
+    created. `before` must come from `slots_on_disk` BEFORE the boot; passing
+    a stale or invented set is the one way to misuse this.
+
+    Refuses on nothing new (no campaign was made) and on more than one new
+    (the diff cannot say which is ours, and guessing is how the wrong save
+    gets deleted). The claim is journalled like any other, so a crash between
+    creating and deleting can still be adopted.
+    """
+    now = slots_on_disk(save_root)
+    fresh = sorted(now - set(before))
+    if not fresh:
+        raise ResetRefused(
+            "no new profile appeared, so no campaign was created and there "
+            "is nothing to own")
+    if len(fresh) > 1:
+        raise ResetRefused(
+            f"{len(fresh)} new profiles appeared ({fresh}) - the diff cannot "
+            f"say which one is ours, and guessing is how the wrong save gets "
+            f"deleted")
+    slot = fresh[0]
+    path = _profile_path(slot, save_root)
+    if path is None:
+        raise ResetRefused(f"cannot locate profile_{slot}")
+    owned = OwnedSlot(slot=slot, path=path, claimed_at=time.time())
+    _write_claim(owned, Path(journal) if journal is not None
+                 else journal_for(Path(save_root)))
+    return owned
 
 
 def _profile_path(slot: int, save_root: Path) -> Optional[Path]:
@@ -353,6 +452,16 @@ def exit_to_main_menu(win, backend, *, say=print, act: bool = False,
         # the whole iteration was written off -- on a game that was one step
         # from where it needed to be.
         here = _await_any(look, ("pause_menu", "title"), timeout)
+        # **ESC from an OVERLAY only closes the overlay.** Measured
+        # 2026-09-23: from the estate map it landed on the Hamlet and the
+        # iteration was written off as stuck. Those screens are one more ESC
+        # from the pause menu, so press again -- a bounded number of times.
+        for _ in range(3):
+            if here in ("pause_menu", "title") or here not in ESC_STEPS_BACK:
+                break
+            say(f"  [reset] ESC again (from {here})")
+            backend.key(VK_ESCAPE)
+            here = _await_any(look, ("pause_menu", "title"), timeout)
         if here == "title":
             say("  [reset] ESC went straight back to the title")
             return True

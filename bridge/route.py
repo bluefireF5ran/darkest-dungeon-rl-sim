@@ -407,7 +407,12 @@ def plan_route(dungeon: DungeonMap, current: Optional[str] = None,
     # move whenever it guesses the wrong one, and a corridor is where a save
     # gets written most often.
     corridor_prefix: list[str] = []
-    if start in dungeon.corridors:
+    # Only when there is something to cover. With the objective met, both
+    # ends tie at zero and the first one won, so the walk named a room and
+    # `next_step` was never empty -- the loot walk, which only takes over on
+    # an empty step, lost every corridor. Live 2026-09-25: rooF -> coFG ->
+    # rooF, four laps with an iron maiden still waiting past coFG.
+    if start in dungeon.corridors and targets:
         best_plan: Optional[tuple[int, str, list[str]]] = None
         # `corridor_rooms`, never `Area.rooms`: the name split invents a room
         # on a generated map and this branch then plans from somewhere the

@@ -235,6 +235,89 @@ LIVENESS_GAP = 1.2
 LIVENESS_SAMPLES = 3
 
 
+FLIP_REMEDY = (
+    "DWM gives a borderless window covering a whole monitor the "
+    "independent-flip path and scans it out directly, so GDI reads nothing. "
+    "Relaunch windowed and smaller than the monitor -- "
+    "`-fullscreen 0 -size 1280 720` -- and check the desktop clock is "
+    "ticking before blaming the display.")
+
+#: What a pure-black frame means when the window is NOT covering a monitor.
+#
+# **THE FIRST CANDIDATE IS A SLEEPING DISPLAY, and it is the one every other
+# control here misses.** Measured 2026-09-21: an unattended night was scored
+# `no-game` over four iterations while the game ran perfectly -- 16.9% of the
+# GPU's 3D engine, a live `title` screen, PlayFab pinging on schedule. Once
+# Windows powers the monitor down, a window's frames stop reaching the
+# surface GDI reads, while the DESKTOP keeps reading fine from its cached
+# composition -- so "is anything drawing?" says yes for the desktop and no
+# for the game, and the machine looks healthy from every angle. It ended when
+# Fran moved the mouse.
+#
+# Geometry NARROWS the rest and does not decide it. A windowed swapchain can
+# still be lifted off the composited path by a multiplane overlay or a
+# capture hook -- `gameoverlayrenderer64.dll` and `nvspcap64.dll` were both
+# injected in the failing case -- so "not borderless" does not mean
+# "composited".
+PROMOTED_REMEDY = (
+    "The window does not cover a monitor and is not borderless, so the "
+    "classic borderless-fullscreen flip is out. Check the DISPLAY FIRST: a "
+    "monitor Windows has powered down reads exactly like this, because the "
+    "desktop still answers from its cached composition while the game's "
+    "frames stop arriving. Wake it (`bridge.window.wake_display`) and hold "
+    "it up for an unattended run (`bridge.window.keep_display_awake`). If it "
+    "was already awake, what is left is a game that has not drawn YET, or a "
+    "windowed swapchain promoted off the composited path by a multiplane "
+    "overlay or a capture hook; nudge the window to force DWM to composite "
+    "it and sample again. To tell a blind capture from a dead game without a "
+    "frame, ask whether the process is still burning GPU 3D time -- a game "
+    "at the title screen is, and a hung one is not.")
+
+
+def _why_pure_black(win) -> str:
+    """Which pure-black cause this is, as far as the evidence supports.
+
+    **The flip explanation is falsifiable, and 2026-09-21 falsified the
+    strong form of it in BOTH directions.** An unattended night refused four
+    times over with the flip message while the window was 1296x759 at (26, 0)
+    on a 1920x1080 monitor -- composited normally, so the remedy it named was
+    already in force. But the first correction here, "not covering a monitor
+    therefore not flipped", was wrong too: the game in that state was burning
+    16.9% of the GPU's 3D engine and sitting on a perfectly good `title`
+    screen, so it WAS drawing and GDI still read nothing.
+
+    What the geometry supports is narrow: `covers_a_monitor` being true makes
+    the borderless-flip path the likely cause and names a remedy that works.
+    False only rules THAT path out, not every way a window leaves the
+    composited surface. So the false branch names the remaining two and the
+    move that addresses both.
+
+    A `win` that cannot answer -- the tests pass a bare `object()` -- leaves
+    it undecided, and then both are named with the historically measured one
+    first, because refusing to guess is the point.
+    """
+    from bridge.window import covers_a_monitor        # noqa: PLC0415
+    try:
+        flipped = bool(covers_a_monitor(win))
+    except Exception:                                  # noqa: BLE001
+        flipped = None
+    try:
+        borderless = bool(getattr(win, "borderless", False))
+    except Exception:                                  # noqa: BLE001
+        borderless = False
+    head = ("The frame is PURE BLACK while the window is up, which is not a "
+            "dead display: the desktop one pixel outside the window draws "
+            "normally. ")
+    if flipped or (flipped is None and borderless):
+        return head + FLIP_REMEDY
+    if flipped is None:
+        return head + ("The geometry could not be read, so both causes stand. "
+                       + FLIP_REMEDY + " If the window is already smaller "
+                       "than the monitor, that is ruled out: "
+                       + PROMOTED_REMEDY)
+    return head + PROMOTED_REMEDY
+
+
 def display_is_live(win, gap: float = LIVENESS_GAP,
                     samples: int = LIVENESS_SAMPLES) -> tuple[bool, str]:
     """`(live, why)` — is anything actually being drawn?
@@ -326,14 +409,7 @@ def display_is_live(win, gap: float = LIVENESS_GAP,
     # wrong one costs an hour: one wants a display attached, the other wants
     # the window to stop covering the monitor.
     if int(first.max()) == 0:
-        return False, head + (
-            "The frame is PURE BLACK while the window is up, which is the "
-            "signature of a window bypassing composition rather than of a "
-            "dead display: DWM gives a borderless window covering a whole "
-            "monitor the independent-flip path and scans it out directly, so "
-            "GDI reads nothing. Relaunch windowed and smaller than the "
-            "monitor -- `-fullscreen 0 -size 1280 720` -- and check the "
-            "desktop clock is ticking before blaming the display.")
+        return False, head + _why_pure_black(win)
     # NOT pure black, so the window is reaching the compositor -- and there
     # the certainty ends. TWO things look like this and brightness does not
     # separate them: a frozen copy of the DESKTOP (~70 here) and the GAME
@@ -351,6 +427,216 @@ def display_is_live(win, gap: float = LIVENESS_GAP,
         "ticking clock with a still game means the GAME is hung and wants "
         "restarting; a frozen clock on every monitor means the display is.")
 
+
+#: The hunger panel's OWN rect, as client-rect fractions.
+#
+# **A FLOATING PANEL IS THE WRONG THING TO MATCH WHOLE-SCREEN**, and it cost
+# two stalls in one afternoon. `hunger` was banked three times -- plain, dark,
+# and over a corridor -- and the fourth room it appeared in read UNKNOWN
+# again, because the reference carries the room art behind the panel and the
+# art changes every room. `_answer_hunger` then refuses to click, the modal
+# swallows every other input, and the raid deadlocks with the party standing
+# in it. Measured 2026-09-21 on Fran's campaign, a lone Grave Robber on 3 HP
+# at 157 stress, told to retreat and unable to send the click.
+#
+# Matched over the panel alone the question stops depending on the room at
+# all. Measured against every banked screen: the three hunger frames score
+# 0.000, 0.001 and 0.002, and the nearest thing that is NOT hunger scores
+# 0.792. The threshold sits in that gap with three orders of magnitude to
+# spare, which is why this is a better instrument and not just another patch.
+HUNGER_PANEL_BOX = (0.598, 0.168, 0.802, 0.562)
+HUNGER_PANEL_MAX = 0.25
+
+_hunger_sigs: Optional[list] = None
+
+
+def hunger_panel_signatures() -> list:
+    """Panel-box signatures of every banked `hunger*.png`, built once."""
+    global _hunger_sigs
+    if _hunger_sigs is None:
+        sigs = []
+        for path in sorted(CAPTURES_SCREENS.glob("hunger*.png")):
+            try:
+                from PIL import Image                      # noqa: PLC0415
+                img = np.asarray(Image.open(path).convert("RGB"))
+                sigs.append(signature(img, box=HUNGER_PANEL_BOX))
+            except Exception:                              # noqa: BLE001
+                continue
+        _hunger_sigs = sigs
+    return _hunger_sigs
+
+
+def hunger_panel_is_up(img: Optional[np.ndarray]) -> bool:
+    """Is DD's hunger panel drawn, whatever room it is drawn over?
+
+    Independent of `recognise`, deliberately: this answers one question about
+    one widget, and it answers it the same way in every room.
+    """
+    if img is None:
+        return False
+    sigs = hunger_panel_signatures()
+    if not sigs:
+        return False
+    try:
+        live = signature(img, box=HUNGER_PANEL_BOX)
+    except Exception:                                      # noqa: BLE001
+        return False
+    return min(distance(live, s) for s in sigs) <= HUNGER_PANEL_MAX
+
+
+# The dungeon TITLE CARD's fixed half: the torch emblem and "Press [SPACE] or
+# [CLICK] to Continue", identical in every region while the art above it is
+# not. Measured 2026-09-23 over the five banked cards (Old Road, Warrens,
+# Cove, Darkest) and a live Weald frame: 0.004-0.037 against each other, and
+# the nearest other screen (hamlet) 0.603. The Cove and the Weald each
+# stalled a raid for minutes before this, as unbanked variants.
+TITLE_CARD_BOX = (0.34, 0.78, 0.66, 0.99)
+TITLE_CARD_MAX = 0.25
+_title_sigs = None
+
+
+def title_card_is_up(img: Optional[np.ndarray]) -> bool:
+    """Is a dungeon's title card up, whichever dungeon it is?"""
+    global _title_sigs
+    if img is None:
+        return False
+    if _title_sigs is None:
+        sigs = []
+        for path in sorted(CAPTURES_SCREENS.glob("dungeon_intro*.png")):
+            try:
+                from PIL import Image                      # noqa: PLC0415
+                sigs.append(signature(np.asarray(Image.open(path).convert("RGB")),
+                                      box=TITLE_CARD_BOX))
+            except Exception:                              # noqa: BLE001
+                continue
+        _title_sigs = sigs
+    if not _title_sigs:
+        return False
+    try:
+        live = signature(img, box=TITLE_CARD_BOX)
+    except Exception:                                      # noqa: BLE001
+        return False
+    return min(distance(live, s) for s in _title_sigs) <= TITLE_CARD_MAX
+
+# The strip under the ENEMY ranks where their health bars are drawn. Measured
+# 2026-09-23: a live fight reads 0.063-0.140 red, a spider on its last sliver
+# of hp 0.0039, and two exploration frames exactly 0.0 -- a fight the save
+# still reported while the screen had no enemy left on it.
+ENEMY_BAR_BOX = (0.56, 0.635, 0.82, 0.665)
+
+
+def enemy_bars_drawn(img: Optional[np.ndarray]) -> Optional[float]:
+    """Fraction of health-bar red under the enemy ranks; None if unreadable."""
+    if img is None:
+        return None
+    try:
+        h, w = img.shape[:2]
+        x0, y0, x1, y1 = ENEMY_BAR_BOX
+        c = img[int(y0 * h):int(y1 * h), int(x0 * w):int(x1 * w), :3].astype(int)
+        r, g, b = c[..., 0], c[..., 1], c[..., 2]
+        return float(((r > 120) & (r > 2.2 * g) & (r > 2.2 * b)).mean())
+    except Exception:                                      # noqa: BLE001
+        return None
+
+
+# A JOURNAL PAGE a curio hands over ("Blood Soaked Pages Torn From A Journal
+# (1/6)"): a parchment modal with its own close X, top right. Unrecognised on
+# 2026-09-23, it sat over a Cove corridor while the route walked into it for
+# six minutes. Matched on the X and the wax seal together -- the text and the
+# page count differ per page -- each 0.505+ from every other banked frame.
+JOURNAL_REF = CAPTURES_SCREENS.parent / "journal_page.png"
+JOURNAL_BOXES = ((0.672, 0.180, 0.703, 0.222), (0.300, 0.605, 0.355, 0.705))
+JOURNAL_MAX = 0.2
+#: Where its close X sits, as a client fraction.
+JOURNAL_CLOSE = (0.6875, 0.200)
+_journal_sigs = None
+
+
+def journal_page_is_up(img: Optional[np.ndarray]) -> bool:
+    """Is a curio's journal-page modal drawn?"""
+    global _journal_sigs
+    if img is None:
+        return False
+    if _journal_sigs is None:
+        try:
+            from PIL import Image                          # noqa: PLC0415
+            ref = np.asarray(Image.open(JOURNAL_REF).convert("RGB"))
+            _journal_sigs = [signature(ref, box=b) for b in JOURNAL_BOXES]
+        except Exception:                                  # noqa: BLE001
+            _journal_sigs = []
+    if not _journal_sigs:
+        return False
+    try:
+        return all(distance(signature(img, box=b), s) <= JOURNAL_MAX
+                   for b, s in zip(JOURNAL_BOXES, _journal_sigs))
+    except Exception:                                      # noqa: BLE001
+        return False
+
+
+# The game's HELP CARD (the "i" button, or H): Fran's PAUSE SWITCH. Asked for
+# 2026-09-23 as a way to stop the bridge mid-run and talk to it: while the
+# card is open, every input the backend would send waits. Matched on its fixed
+# candle header and hotkey text; the nearest other screen (the pause menu)
+# is 0.342 away.
+HELP_CARD_REF = CAPTURES_SCREENS.parent / "help_card.png"
+HELP_CARD_BOX = (0.37, 0.24, 0.68, 0.42)
+HELP_CARD_MAX = 0.15
+_help_sig = None
+
+
+def help_card_is_up(img: Optional[np.ndarray]) -> bool:
+    """Is the game's help card open?"""
+    global _help_sig
+    if img is None:
+        return False
+    if _help_sig is None:
+        try:
+            from PIL import Image                          # noqa: PLC0415
+            _help_sig = signature(np.asarray(Image.open(HELP_CARD_REF)
+                                             .convert("RGB")), box=HELP_CARD_BOX)
+        except Exception:                                  # noqa: BLE001
+            _help_sig = False
+    if _help_sig is False:
+        return False
+    try:
+        return distance(signature(img, box=HELP_CARD_BOX), _help_sig)             <= HELP_CARD_MAX
+    except Exception:                                      # noqa: BLE001
+        return False
+
+# A building panel's TITLE PLATE (name and icon, top left of the panel).
+# Measured 2026-09-23: the coach panel came up with the coachman's speech
+# bubble over it and a different recruit list, the whole-frame match failed,
+# and the town visit gave up at its first step. On the title plate the live
+# frame is 0.027 from the banked coach panel, the coach's upgrades tab 0.168,
+# and every other screen 0.41 or more.
+PANEL_TITLE_BOX = (0.085, 0.14, 0.29, 0.26)
+PANEL_TITLE_MAX = 0.25
+_panel_title_sigs = None
+
+
+def panel_title_match(img: Optional[np.ndarray]) -> str:
+    """The banked building panel whose title plate this frame shows, or ""."""
+    global _panel_title_sigs
+    if img is None:
+        return ""
+    if _panel_title_sigs is None:
+        sigs = []
+        for path in sorted(CAPTURES_SCREENS.glob("*_panel*.png")):
+            try:
+                from PIL import Image                      # noqa: PLC0415
+                a = np.asarray(Image.open(path).convert("RGB"))
+                sigs.append((path.stem.split("@")[0],
+                             signature(a, box=PANEL_TITLE_BOX)))
+            except Exception:                              # noqa: BLE001
+                continue
+        _panel_title_sigs = sigs
+    try:
+        live = signature(img, box=PANEL_TITLE_BOX)
+    except Exception:                                      # noqa: BLE001
+        return ""
+    best = min(((distance(live, sig), name) for name, sig in _panel_title_sigs),
+               default=(9.0, ""))
+    return best[1] if best[0] <= PANEL_TITLE_MAX else ""
 
 def _boxdown(a: np.ndarray, nx: int, ny: int) -> np.ndarray:
     """Area-average `a` down to (ny, nx). Plain numpy, no PIL at runtime."""
@@ -641,8 +927,90 @@ def recognise(img: np.ndarray, refs: Optional[dict[str, np.ndarray]] = None, *,
     corpus, and reading the list as the modal would click `MODAL_OK` into the
     DLC rows and switch a DLC off with nothing to notice it. A near-tie must
     come back as "I do not know".
+
+    **One fallback, for a page whose art varies without bound.** The raid
+    progression page draws over the dungeon's own backdrop and animates its
+    quirk shields in, so whole-frame refs miss it region by region (Escape
+    over the Cove, then over the Weald, 2026-09-23). Its "Return to Town" /
+    "Next" strip is fixed: every banked progression page scores <= 0.095 on
+    it and the nearest other screen 0.236. Only consulted when the whole
+    frame is unsure, and only against the shipped refs.
     """
-    return rank(img, refs, thresh=thresh, margin=margin)[0]
+    name = rank(img, refs, thresh=thresh, margin=margin)[0]
+    if not name and refs is None and progression_strip_is_up(img):
+        return "raid_progression_quirks"
+    if not name and refs is None and results_page_is_up(img):
+        return "raid_results"
+    return name
+
+
+PROGRESSION_STRIP_BOX = (0.40, 0.905, 0.60, 0.975)
+PROGRESSION_STRIP_MAX = 0.15
+_progression_sigs = None
+
+
+def progression_strip_is_up(img: Optional[np.ndarray]) -> bool:
+    """Is the raid progression page's bottom strip drawn?"""
+    global _progression_sigs
+    if img is None:
+        return False
+    if _progression_sigs is None:
+        sigs = []
+        for path in sorted(CAPTURES_SCREENS.glob("raid_progression*.png")):
+            try:
+                from PIL import Image                      # noqa: PLC0415
+                sigs.append(signature(np.asarray(Image.open(path).convert("RGB")),
+                                      box=PROGRESSION_STRIP_BOX))
+            except Exception:                              # noqa: BLE001
+                continue
+        _progression_sigs = sigs
+    if not _progression_sigs:
+        return False
+    try:
+        live = signature(img, box=PROGRESSION_STRIP_BOX)
+    except Exception:                                      # noqa: BLE001
+        return False
+    return min(distance(live, s) for s in _progression_sigs)         <= PROGRESSION_STRIP_MAX
+
+
+# The RESULTS page (quest rewards, treasure, heirlooms): same problem, and its
+# bottom strip alone is 0.16 from the Hamlet's Embark button. So two boxes:
+# the crest header (Escape / Defeat / Victory, every variant banked) AND the
+# results "Next" strip. A completed Cove quest's page stalled the last
+# iteration of 2026-09-23 as an unbanked variant with a tooltip over a gem.
+RESULTS_HEADER_BOX = (0.41, 0.0, 0.59, 0.10)
+RESULTS_HEADER_MAX = 0.2
+RESULTS_STRIP_MAX = 0.1
+_results_sigs = None
+
+
+def results_page_is_up(img: Optional[np.ndarray]) -> bool:
+    """Is a raid results page drawn, whatever the backdrop and tooltip?"""
+    global _results_sigs
+    if img is None:
+        return False
+    if _results_sigs is None:
+        heads, strips = [], []
+        try:
+            from PIL import Image                          # noqa: PLC0415
+            for path in sorted(CAPTURES_SCREENS.glob("raid_*.png")):
+                a = np.asarray(Image.open(path).convert("RGB"))
+                heads.append(signature(a, box=RESULTS_HEADER_BOX))
+                if path.name.startswith("raid_results"):
+                    strips.append(signature(a, box=PROGRESSION_STRIP_BOX))
+        except Exception:                                  # noqa: BLE001
+            heads, strips = [], []
+        _results_sigs = (heads, strips)
+    heads, strips = _results_sigs
+    if not heads or not strips:
+        return False
+    try:
+        h = signature(img, box=RESULTS_HEADER_BOX)
+        st = signature(img, box=PROGRESSION_STRIP_BOX)
+    except Exception:                                      # noqa: BLE001
+        return False
+    return (min(distance(h, x) for x in heads) <= RESULTS_HEADER_MAX
+            and min(distance(st, x) for x in strips) <= RESULTS_STRIP_MAX)
 
 
 #: Where to put the mouse when a tooltip is in the way, as client fractions.

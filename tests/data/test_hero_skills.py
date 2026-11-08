@@ -18,6 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import pytest
+from functools import lru_cache
 
 from data import hero_skills as HS
 from data.town_costs import hero_upgrades_path, load_hero_costs
@@ -148,6 +149,36 @@ def test_the_tally_is_reread_when_the_save_changes(tmp_path):
     assert HS.rank_counts(tmp_path) == {}       # different key, same answer
 
 
+@lru_cache(maxsize=None)
+def _camp_tree_hashes(hero_class: str) -> frozenset:
+    """Every `<class>.<camp_skill>` tree hash the machine can offer this class.
+
+    Read from BOTH the shipped `*.camping_skills.json` and the Workshop
+    content, because a live save records what it was PLAYED with and mods add
+    camp skills to shipped classes. 983 camp-skill ids across the two.
+    """
+    import json
+
+    from data.dson import dd_name_hash
+
+    out = set()
+    roots = [Path(GD)]
+    workshop = Path(
+        r"D:/Program Files (x86)/Steam/steamapps/workshop/content/262060")
+    if workshop.is_dir():
+        roots.append(workshop)
+    for root in roots:
+        for f in root.rglob("*.camping_skills.json"):
+            try:
+                raw = json.load(open(f, encoding="utf-8", errors="replace"))
+            except (OSError, ValueError):
+                continue
+            for skill in raw.get("skills") or []:
+                sid = skill.get("id")
+                if sid:
+                    out.add(dd_name_hash(f"{hero_class}.{sid}") & 0xFFFFFFFF)
+    return frozenset(out)
+
 def test_the_live_save_leaves_exactly_the_camp_skills_unnamed():
     """The invariant that says the reading still holds, on a save that moves.
 
@@ -187,10 +218,21 @@ def test_the_live_save_leaves_exactly_the_camp_skills_unnamed():
         # now the common case rather than an oddity. Both readings are the
         # game's, so the assertion is the weaker true one: the leftovers are
         # camp trees or there are none, never some third thing.
-        leftover = len(HS.unaccounted(profile, hero, GD))
-        assert leftover in (0, len(hero.hero.camping_skills)), (
-            f"{hero.label()}: {leftover} unnamed tree(s) against "
-            f"{len(hero.hero.camping_skills)} camp skills")
+        # THE CLAIM IS WHAT THEY ARE, NOT HOW MANY. This counted the
+        # leftovers against `hero.hero.camping_skills`, which is the
+        # MODS-OFF store: `crusader#1295` leaves 6 unnamed trees against
+        # a vanilla 4, and all six invert to real crusader camp skills
+        # (`zealous_speech`, `stand_tall`, `zealous_vigil`,
+        # `unshakeable_leader`, `pep_talk`, `first_aid`) because mods add
+        # camp skills the store was not loaded with. The count was never
+        # the invariant -- "the leftovers are camp trees and nothing
+        # else" was -- so assert that directly, which is stronger and
+        # survives a modded save.
+        leftovers = set(HS.unaccounted(profile, hero, GD))
+        unexplained = leftovers - _camp_tree_hashes(hero.hero_class)
+        assert not unexplained, (
+            f"{hero.label()}: {len(unexplained)} unnamed tree(s) that are "
+            f"not camp skills for this class: {sorted(unexplained)}")
         # Every named tree belongs to this hero's own class, which is the
         # other half of "the instance is the guid".
         owned = set(load_hero_costs(GD, hero.hero_class).skills)

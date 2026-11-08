@@ -435,18 +435,60 @@ def _clicked(runner):
     return [s for s in runner.actuator.backend.sent if s.kind == "click"]
 
 
-def test_the_panel_item_slot_is_clicked_for_a_use_curio(monkeypatch):
-    """THE LIVE BLOCKER. The party stood at the Cove's Shipwreck with four
-    shovels and the bridge could only click the X, so the raid ended stuck in
-    a corridor. The item slot is one pitch left of the X."""
+def _right_clicked(runner):
+    """The right button is its own KIND, so it is its own filter. Keeping the
+    two apart is the point: the game reads them as different verbs."""
+    return [s for s in runner.actuator.backend.sent if s.kind == "rclick"]
+
+
+def test_using_an_item_on_a_curio_is_a_RIGHT_click(monkeypatch):
+    """**The verb is the right button, and the bridge had no right button.**
+
+    `[pc]str_help_raid_room_6`: *"While interacting with an object:
+    [RIGHT-CLICK] an inventory item to apply it to the object."* This path
+    used to send a LEFT click, so every loot curio wanting a key or a shovel
+    was unreachable however well the decision layer priced it. Fran,
+    2026-09-21: *"the model seems to be unable to use inventory items to
+    right click with curio, specially with loot curios"*.
+
+    With no raid save to read the pack from, it falls back to the panel's own
+    item slot -- the original target, and still the right one when the save
+    cannot say which cell holds the item. What must not regress is the
+    BUTTON.
+    """
     buttons = _Buttons()
     r = _panel_runner(monkeypatch, buttons)
     assert r._work_curio_panel("barnacle_crusted_chest",
                                A(curio_action="use", curio_id="x",
                                  curio_item="shovel"))
-    sent = _clicked(r)
+    assert _clicked(r) == [], "a left click cannot apply an item"
+    sent = _right_clicked(r)
     assert len(sent) == 1
     assert sent[0].screen == r.resolved.win.to_screen(*buttons.items[0])
+
+
+def test_the_item_is_found_in_the_PACK_when_the_save_can_say_where(monkeypatch):
+    """The save names what is in every cell, so the click can be exact about
+    WHICH item is spent. The panel's item row only ever said how many slots
+    were lit, which is why `sole_item` refuses whenever more than one is."""
+    from bridge.inventory import Slot
+
+    buttons = _Buttons()
+    r = _panel_runner(monkeypatch, buttons)
+    r.raid_path = Path("nonexistent-but-not-None.json")
+    monkeypatch.setattr("bridge.inventory.read_pack",
+                        lambda _p: [Slot(slot=0, type="supply", id="torch",
+                                         amount=3),
+                                    Slot(slot=5, type="supply", id="shovel",
+                                         amount=2)])
+    assert r._work_curio_panel("barnacle_crusted_chest",
+                               A(curio_action="use", curio_id="x",
+                                 curio_item="shovel"))
+    sent = _right_clicked(r)
+    assert len(sent) == 1
+    assert sent[0].screen == r.resolved.inventory_point(5), (
+        "it spent whatever the panel had lit instead of the shovel the save "
+        "located")
 
 
 def test_the_hand_is_clicked_for_a_bare_handed_curio(monkeypatch):
@@ -1555,6 +1597,110 @@ def _room_update(advice=None, area="rooJ", dungeon=None):
                   room_advice=advice, dungeon=dungeon, area=area)
 
 
+# -- the survival verdict, BETWEEN rooms ------------------------------------
+#
+# `plan_battle` has acted on `retreat_advised` since the six-polls-of-RETREAT
+# incident, but that is the BATTLE path. Out of combat there is no retreat
+# button and the verdict went nowhere. Measured 2026-09-21 on Fran's
+# campaign: two heroes left, the Houndmaster on 4 HP at 100 stress,
+# `advise_retreat` reporting P(finish intact) 0% and P(a death) 75% -- and
+# the router planned the next corridor.
+
+def _leaving_runner(monkeypatch, tmp_path, was_in_battle=False):
+    import bridge.screen as screen_mod
+    raid = tmp_path / "persist.raid.json"
+    raid.write_bytes(b"a")
+    r = _runner(monkeypatch, armed=True, confirm=False)
+    r.raid_path = raid
+    r._was_in_battle = was_in_battle
+    left = []
+    monkeypatch.setattr(
+        r, "_leave_raid",
+        lambda seen, abandon=False: left.append(abandon) or True)
+    # `_handle_room` imports this locally, so the real module is the seam.
+    monkeypatch.setattr(screen_mod, "recognise_live", lambda _w: "")
+    return r, left
+
+
+def test_a_room_told_to_RETREAT_presses_the_ABANDON_X(monkeypatch, tmp_path):
+    """**The X, not the seal.** Fran: *"for retreat you need to click the X
+    button on the top left"*. The seal banks a COMPLETED quest and the X
+    abandons an unfinished one -- 40 px apart and not interchangeable."""
+    r, left = _leaving_runner(monkeypatch, tmp_path)
+    update = _room_update()
+    object.__setattr__(update, "retreat_advised", True)
+    r._handle_room(update)
+    assert left, "the survival layer said LEAVE and nothing left the raid"
+    assert left == [True], "it pressed the quest seal instead of the X"
+
+
+def test_a_retreat_with_the_objective_MET_leaves_by_the_SEAL(monkeypatch, tmp_path):
+    """Live 2026-09-25: RETURN (objective met) and RETREAT agreed. A completed
+    quest's HUD draws no abandon X, so the X click hit nothing and the key it
+    set barred every later poll -- thirteen iterations of 189 s. With the
+    objective met, leaving is the seal whatever asked for it."""
+    from bridge.run import RoomAdvice
+    r, left = _leaving_runner(monkeypatch, tmp_path)
+    update = _room_update(RoomAdvice(raid_end="return"))
+    object.__setattr__(update, "retreat_advised", True)
+    r._handle_room(update)
+    assert left == [False], "it pressed the abandon X on a completed quest"
+
+
+def test_an_abandon_that_did_not_leave_falls_back_to_the_seal(monkeypatch, tmp_path):
+    import bridge.act as act
+    r = _runner(monkeypatch, armed=True, confirm=False)
+    r.acted.add("raid-abandoned")
+    asked = []
+    monkeypatch.setattr(act, "plan_leave_raid",
+                        lambda res: asked.append("seal") or act.refuse("test", "raid"))
+    r._leave_raid("", abandon=True)
+    assert asked == ["seal"], "it stood still instead of trying the seal"
+
+
+def test_a_room_NOT_told_to_retreat_keeps_playing(monkeypatch, tmp_path):
+    """Narrow on purpose: this may only ever fire on the verdict."""
+    r, left = _leaving_runner(monkeypatch, tmp_path)
+    r._handle_room(_room_update())
+    assert not left
+
+
+def test_it_waits_for_the_LOOT_window_before_leaving(monkeypatch, tmp_path):
+    """Leaving with the post-fight loot window open would abandon loot
+    already won, for no gain -- the retreat is priced against pushing ON,
+    not against the loot in hand."""
+    r, left = _leaving_runner(monkeypatch, tmp_path, was_in_battle=True)
+    update = _room_update()
+    object.__setattr__(update, "retreat_advised", True)
+    r._handle_room(update)
+    assert not left, "it left with the loot window still up"
+
+
+def test_the_retreat_is_NOT_sent_on_the_entrance_room(monkeypatch, tmp_path):
+    """**A retreat before the first fight is a verdict on the QUEST, not on
+    survival**, and the provisions are already bought by then -- so acting on
+    it pays for the expedition twice and banks nothing.
+
+    Measured 2026-09-22 with `--survival 12` newly wired in: a fresh party at
+    torch 100 was handed a 7-fight Warrens cleanse, the rollout read P(finish
+    intact) 8% and P(a death) 58%, and the loop abandoned four seconds into
+    the raid -- twice, at about 5,000 gold of provisions each, taking the
+    wallet 9,865 -> 5,015 -> 20. The gold agreed with pushing on both times;
+    only the death floor overrode it.
+
+    The gate lives in `run.py`, which is what decides `retreat_advised` for
+    the room path; this pins the shape of the rule so the flag cannot be set
+    from a raid with no fights behind it.
+    """
+    import inspect
+
+    import bridge.run as run
+
+    src_text = inspect.getsource(run.Session.room)
+    assert "battles_completed" in src_text, (
+        "nothing gates the room retreat on progress")
+    assert "retreat_advised = False" in src_text
+
 def test_loot_is_taken_with_space_after_a_fight(monkeypatch, tmp_path):
     """SPACE = take ALL when the loot window is up, the game's own hotkey.
     The loot window swallows movement input, so it must be cleared first."""
@@ -1837,7 +1983,20 @@ def test_a_grown_pack_is_what_proves_a_loot_curio_worked(monkeypatch, tmp_path):
     monkeypatch.setattr(r, "_take_loot", lambda after="": None)
     worked, why = r._curio_landed("coBC", "sack")
     assert worked, why
-    assert "2 -> 3" in why, why
+    assert "c +1" in why, why
+
+
+def test_loot_that_merges_into_a_carried_stack_still_counts():
+    """Live 2026-09-25: a discarded pack's gold merged into the gold already
+    carried, the slot count stood still, and the curio was pressed six more
+    times after it had worked. Quantity is the witness, not slots."""
+    from bridge.act import pack_grew
+    from bridge.inventory import Slot
+    before = [Slot(0, "gold", "", 250), Slot(1, "provision", "", 4)]
+    after = [Slot(0, "gold", "", 500), Slot(1, "provision", "", 4)]
+    assert pack_grew(before, after) == "gold +250"
+    assert pack_grew(before, before) == ""
+    assert pack_grew(None, after) == ""
 
 
 def test_a_curio_is_followed_by_taking_its_loot(monkeypatch, tmp_path):
@@ -2062,7 +2221,7 @@ def test_the_destination_room_is_clicked_once_the_map_is_up(monkeypatch):
     monkeypatch.setattr(screen_mod, "grab", lambda w: object())
     monkeypatch.setattr(screen_mod, "panel", lambda i, _raid=None: "map")
     monkeypatch.setattr(mappanel, "locate",
-                        lambda img, d, a: ((0.75, 0.86), "48.0 px/unit"))
+                        lambda img, d, a, here="": ((0.75, 0.86), "48.0 px/unit"))
     monkeypatch.setattr(r, "_focused_or_wait", lambda: True)
     monkeypatch.setattr(r, "_refresh_layout", lambda: r.resolved)
     monkeypatch.setattr(r, "_send_and_confirm", lambda plan, **kw: True)
@@ -2087,7 +2246,7 @@ def test_the_click_uses_the_LAST_fit_not_the_planning_one(monkeypatch):
     seen = []
     calls = []
 
-    def _locate(_img, _d, _a):
+    def _locate(_img, _d, _a, here=""):
         # The planning fit once, then the fresh one on every sampled frame:
         # the loop scores ALL of them and keeps the best, so it does not stop
         # at the first success and the stub must not run out.
@@ -2123,7 +2282,7 @@ def test_a_view_that_will_not_fit_NOW_is_a_refusal(monkeypatch, capsys):
     # grab is a coin flip. Refusing still has to happen when none of them fit.
     seen = []
 
-    def _locate(_img, _d, _a):
+    def _locate(_img, _d, _a, here=""):
         seen.append(1)
         if len(seen) == 1:
             return ((0.75, 0.86), "planning fit")
@@ -2159,7 +2318,7 @@ def test_a_map_that_has_not_moved_still_clicks(monkeypatch):
     monkeypatch.setattr(screen_mod, "grab", lambda w: object())
     monkeypatch.setattr(screen_mod, "panel", lambda i, _raid=None: "map")
     monkeypatch.setattr(mappanel, "locate",
-                        lambda img, d, a: ((0.75, 0.86), "48.0 px/unit"))
+                        lambda img, d, a, here="": ((0.75, 0.86), "48.0 px/unit"))
     monkeypatch.setattr(r, "_focused_or_wait", lambda: True)
     monkeypatch.setattr(r, "_refresh_layout", lambda: r.resolved)
     monkeypatch.setattr(r, "_send_and_confirm", lambda plan, **kw: True)
@@ -2180,7 +2339,7 @@ def test_the_corridor_is_never_the_click_target(monkeypatch):
     monkeypatch.setattr(screen_mod, "grab", lambda w: object())
     monkeypatch.setattr(screen_mod, "panel", lambda i, _raid=None: "map")
     monkeypatch.setattr(mappanel, "locate",
-                        lambda img, d, a: (asked.append(a), (None, "no"))[1])
+                        lambda img, d, a, here="": (asked.append(a), (None, "no"))[1])
     monkeypatch.setattr(screen_mod, "save_png", lambda *a: False)
     monkeypatch.setattr(r, "_focused_or_wait", lambda: True)
     monkeypatch.setattr(r, "_refresh_layout", lambda: r.resolved)
@@ -2203,11 +2362,15 @@ def test_an_unlocatable_room_is_refused_and_the_frame_is_banked(monkeypatch,
     monkeypatch.setattr(screen_mod, "grab", lambda w: object())
     monkeypatch.setattr(screen_mod, "panel", lambda i, _raid=None: "map")
     monkeypatch.setattr(mappanel, "locate",
-                        lambda img, d, a: (None, "rooB is not drawn on the map"))
+                        lambda img, d, a, here="": (None, "rooB is not drawn on the map"))
     monkeypatch.setattr(screen_mod, "save_png",
                         lambda img, path: wrote.append(path) or True)
     monkeypatch.setattr(r, "_focused_or_wait", lambda: True)
     monkeypatch.setattr(r, "_refresh_layout", lambda: r.resolved)
+    # The one view reset this destination is allowed is spent and changes
+    # nothing, which is the situation this test is about: after it, the
+    # refusal still has to be a refusal.
+    monkeypatch.setattr(r, "_reset_map_view", lambda *a, **k: None)
     r.handle(_room_update(A(next_step="coAB", next_room="rooB"),
                           area="rooA", dungeon=object()))
     out = capsys.readouterr().out
@@ -2226,7 +2389,7 @@ def test_a_failed_screenshot_still_explains_the_refusal(monkeypatch, capsys):
     r = _runner(monkeypatch, armed=True, confirm=False)
     monkeypatch.setattr(screen_mod, "grab", lambda w: object())
     monkeypatch.setattr(screen_mod, "panel", lambda i, _raid=None: "map")
-    monkeypatch.setattr(mappanel, "locate", lambda img, d, a: (None, "no fit"))
+    monkeypatch.setattr(mappanel, "locate", lambda img, d, a, here="": (None, "no fit"))
     monkeypatch.setattr(screen_mod, "save_png", lambda *a: False)
     monkeypatch.setattr(r, "_focused_or_wait", lambda: True)
     monkeypatch.setattr(r, "_refresh_layout", lambda: r.resolved)
@@ -2522,7 +2685,7 @@ def test_the_fit_ORDERS_the_candidates_and_the_GAME_picks(monkeypatch):
     monkeypatch.setattr(screen_mod, "panel", lambda i, _raid=None: "map")
     monkeypatch.setattr(screen_mod, "save_png", lambda *a: False)
     monkeypatch.setattr(mappanel, "locate",
-                        lambda img, d, a: ((0.50, 0.50), "48.0 px/unit"))
+                        lambda img, d, a, here="": ((0.50, 0.50), "48.0 px/unit"))
     # One cell sits a little away from the fit's own point; only it is legal.
     good = mappanel.Box(700, 740, 400, 440)
     monkeypatch.setattr(mappanel, "find_boxes", lambda img: [good])
@@ -2605,7 +2768,7 @@ def test_no_tooltip_means_the_game_REFUSES_the_move(monkeypatch):
     monkeypatch.setattr(screen_mod, "panel", lambda i, _raid=None: "map")
     monkeypatch.setattr(screen_mod, "save_png", lambda *a: False)
     monkeypatch.setattr(mappanel, "locate",
-                        lambda img, d, a: ((0.75, 0.86), "48.0 px/unit"))
+                        lambda img, d, a, here="": ((0.75, 0.86), "48.0 px/unit"))
     monkeypatch.setattr(r, "_focused_or_wait", lambda: True)
     monkeypatch.setattr(r, "_refresh_layout", lambda: r.resolved)
     monkeypatch.setattr(r, "_map_offers_move", lambda *a: False)
@@ -2644,7 +2807,7 @@ def test_an_UNASKABLE_tooltip_still_clicks(monkeypatch):
     monkeypatch.setattr(screen_mod, "grab", lambda w: object())
     monkeypatch.setattr(screen_mod, "panel", lambda i, _raid=None: "map")
     monkeypatch.setattr(mappanel, "locate",
-                        lambda img, d, a: ((0.75, 0.86), "48.0 px/unit"))
+                        lambda img, d, a, here="": ((0.75, 0.86), "48.0 px/unit"))
     monkeypatch.setattr(r, "_focused_or_wait", lambda: True)
     monkeypatch.setattr(r, "_refresh_layout", lambda: r.resolved)
     monkeypatch.setattr(r, "_map_offers_move", lambda *a: None)
@@ -2695,7 +2858,7 @@ def test_a_map_click_is_sent_ONCE(monkeypatch):
     monkeypatch.setattr(screen_mod, "grab", lambda w: object())
     monkeypatch.setattr(screen_mod, "panel", lambda i, _raid=None: "map")
     monkeypatch.setattr(mappanel, "locate",
-                        lambda img, d, a: ((0.75, 0.86), "48.0 px/unit"))
+                        lambda img, d, a, here="": ((0.75, 0.86), "48.0 px/unit"))
     monkeypatch.setattr(r, "_focused_or_wait", lambda: True)
     monkeypatch.setattr(r, "_refresh_layout", lambda: r.resolved)
     monkeypatch.setattr(r, "_send_and_confirm",
@@ -2719,7 +2882,7 @@ def test_a_MISSED_map_click_recentres_the_view(monkeypatch):
     monkeypatch.setattr(screen_mod, "panel", lambda i, _raid=None: "map")
     monkeypatch.setattr(screen_mod, "save_png", lambda *a: False)
     monkeypatch.setattr(mappanel, "locate",
-                        lambda img, d, a: ((0.75, 0.86), "48.0 px/unit"))
+                        lambda img, d, a, here="": ((0.75, 0.86), "48.0 px/unit"))
     monkeypatch.setattr(r, "_focused_or_wait", lambda: True)
     monkeypatch.setattr(r, "_refresh_layout", lambda: r.resolved)
     monkeypatch.setattr(r, "_send_and_confirm", lambda plan, **kw: False)
@@ -2742,7 +2905,7 @@ def test_an_EMPTY_panel_reopens_it_rather_than_giving_up(monkeypatch):
     monkeypatch.setattr(screen_mod, "panel", lambda i, _raid=None: "map")
     monkeypatch.setattr(screen_mod, "save_png", lambda *a: False)
     monkeypatch.setattr(mappanel, "locate",
-                        lambda img, d, a: (None, "nothing is drawn in the map panel"))
+                        lambda img, d, a, here="": (None, "nothing is drawn in the map panel"))
     monkeypatch.setattr(r, "_focused_or_wait", lambda: True)
     monkeypatch.setattr(r, "_refresh_layout", lambda: r.resolved)
     reset = []
@@ -2753,10 +2916,21 @@ def test_an_EMPTY_panel_reopens_it_rather_than_giving_up(monkeypatch):
     assert reset, "an empty panel did not reopen it"
 
 
-def test_a_room_that_is_NOT_DRAWN_still_refuses_without_pressing_keys(monkeypatch):
-    """The other side of the split, and it must not move: an unscouted room is
-    not on the map and reopening the panel cannot put it there. A refusal that
-    quietly presses keys first is not a refusal."""
+def test_a_room_that_is_NOT_DRAWN_costs_at_most_ONE_view_reset(monkeypatch):
+    """**"Not drawn" is usually the VIEW, so it gets one reset and no more.**
+
+    This used to assert the opposite -- that a "not drawn" refusal never
+    pressed a key -- on the reasoning that an unscouted room cannot be made
+    to appear by reopening the panel. True, and not the common case: DD draws
+    every room it has a cell for, including unexplored ones, so the usual
+    reason a target is not drawn is that the view is zoomed past it.
+    Measured live 2026-09-20 in a crypts raid: `rooD is not drawn` at 5 cells,
+    the hover confirmed nothing, the click went out anyway and missed, and the
+    reset on the NEXT poll found 12 cells of 12 frames and the click landed.
+
+    The old property still has to hold for the room that really is not there,
+    and it is the BOUND that carries it: one reset per destination, never one
+    per poll."""
     from bridge import screen as screen_mod
     from bridge import mappanel
     r = _runner(monkeypatch, armed=True, confirm=False)
@@ -2764,15 +2938,18 @@ def test_a_room_that_is_NOT_DRAWN_still_refuses_without_pressing_keys(monkeypatc
     monkeypatch.setattr(screen_mod, "panel", lambda i, _raid=None: "map")
     monkeypatch.setattr(screen_mod, "save_png", lambda *a: False)
     monkeypatch.setattr(mappanel, "locate",
-                        lambda img, d, a: (None, "rooB is not drawn on the map"))
+                        lambda img, d, a, here="": (None, "rooB is not drawn on the map"))
     monkeypatch.setattr(r, "_focused_or_wait", lambda: True)
     monkeypatch.setattr(r, "_refresh_layout", lambda: r.resolved)
     reset = []
     monkeypatch.setattr(r, "_reset_map_view",
                         lambda *a, **k: (reset.append(1), None)[1])
-    r.handle(_room_update(A(next_step="coAB", next_room="rooB"),
-                          area="rooA", dungeon=object()))
-    assert not reset, "reopened the panel for a room that is simply not there"
+    for _ in range(4):
+        r.handle(_room_update(A(next_step="coAB", next_room="rooB"),
+                              area="rooA", dungeon=object()))
+    assert len(reset) == 1, (
+        f"{len(reset)} view resets for one destination -- a room that is "
+        f"simply not there must not cost MAP_RESET_WATCH on every poll")
 
 def test_a_stray_curio_panel_is_CLOSED_before_anything_else(monkeypatch):
     """It is modal over the world: every keystroke after it goes into it.
@@ -3287,6 +3464,28 @@ def test_the_party_goes_back_in_order_after_a_fight(monkeypatch, tmp_path):
                                      full_pack="abandon")
     _hit_full_pack(r)
     assert r.resolved.win.to_screen(*PARTY_ORDER) in [c.screen for c in _clicks(r)]
+
+
+def test_the_party_order_waits_for_the_quest_complete_banner(monkeypatch,
+                                                            tmp_path):
+    """Evidence 2026-09-28 (`captures/_party_order_1_*`): the crest was rising
+    over the loot window when Default Party order was clicked, the modal took
+    the click, and the next fight started out of order. The reset is put off
+    while the banner is up and sent on the first poll after it is gone."""
+    from bridge import screen as screen_mod
+    from bridge.layout import PARTY_ORDER
+    r, _raid, _s = _full_pack_runner(monkeypatch, tmp_path, 2,
+                                     full_pack="abandon")
+    button = r.resolved.win.to_screen(*PARTY_ORDER)
+    monkeypatch.setattr(screen_mod, "recognise_live",
+                        lambda *a, **k: "quest_complete")
+    r._reset_formation()
+    assert button not in [c.screen for c in _clicks(r)]
+    assert r._formation_due
+    monkeypatch.setattr(screen_mod, "recognise_live", lambda *a, **k: "")
+    r.handle(_room_update(A(next_step="coIJ")))
+    assert button in [c.screen for c in _clicks(r)]
+    assert not r._formation_due
 
 
 def test_the_tutorial_order_is_fixed_with_moves_when_the_button_is_inert(
@@ -4063,14 +4262,16 @@ def test_the_snuff_holds_BOTH_modifiers(resolved):
     """`str_snuff_torch_tip` is SHIFT+CTRL+CLICK. SHIFT alone on the SAME
     widget only reduces the torch, so dropping a modifier turns a snuff into a
     partial dim and the loot bonus is lost quietly."""
-    from bridge.act import VK_CONTROL, VK_SHIFT, plan_snuff_torch
+    from bridge.act import VK_LCONTROL, VK_LSHIFT, plan_snuff_torch
 
     plan = plan_snuff_torch(resolved)
     assert plan.actionable
     assert len(plan.steps) == 1
     step = plan.steps[0]
     assert step.kind == "click"
-    assert set(step.mods) == {VK_SHIFT, VK_CONTROL}
+    assert set(step.mods) == {VK_LSHIFT, VK_LCONTROL}, (
+        "the SIDED keys are what a real keyboard sends -- Fran, "
+        "2026-09-21: 'left ctrl i think'")
     assert step.screen != (0, 0)
 
 
@@ -4240,11 +4441,100 @@ def _torch_clicks(runner):
     return [s for s in runner.actuator.backend.sent if s.kind == "click"]
 
 
+# -- a torch that went UP ----------------------------------------------------
+#
+# Fran, 2026-09-21, watching it live: *"the model didn't snuff torch, in fact,
+# it increased torch before killing the last enemy just now"*. The log for
+# that raid shows 82 -> 100 after a snuff -- +25 capped, a torch spent, on a
+# killing blow the snuff existed to darken.
+
+def test_a_torch_that_went_UP_stops_the_sweep_dead(monkeypatch, tmp_path):
+    """A rise is the USE control answering a click whose modifier never
+    arrived. Sweeping on spends one more torch per candidate, and there is no
+    ordering in which trying it again is worth doing."""
+    r, _seen = _torch_runner(monkeypatch, tmp_path, [82.0, 100.0])
+    assert r._snuff_torch() is False
+    # 82 is four steps, so one plan is four clicks. The guard's job is to
+    # stop a SECOND candidate being tried once a torch has been spent.
+    assert len(_torch_clicks(r)) <= 4, (
+        "it tried another candidate after burning a torch")
+    assert getattr(r, "_torch_raiser", None) is not None, (
+        "the USE control has to be remembered, not merely skipped once")
+
+
+def test_the_candidate_that_RAISED_is_removed_from_the_order(monkeypatch,
+                                                             tmp_path):
+    r, _seen = _torch_runner(monkeypatch, tmp_path, [82.0, 100.0])
+    before = len(r._torch_order())
+    r._snuff_torch()
+    after = r._torch_order()
+    assert len(after) == before - 1
+    assert all(t[1] != r._torch_raiser[1] for t in after)
+
+
+def test_a_modifier_that_never_went_down_does_NOT_click(monkeypatch):
+    """The bare click is a DIFFERENT action, not a weaker one: on this widget
+    it uses a torch. Refusing to send it is the only safe answer."""
+    import bridge.act as act
+
+    backend = act.SendInputBackend()
+    monkeypatch.setattr(backend, "move", lambda _p: True)
+    monkeypatch.setattr(backend, "_normalise", lambda _p: (0, 0))
+    monkeypatch.setattr(backend, "_mods", lambda *_a, **_k: None)
+    monkeypatch.setattr(act.time, "sleep", lambda *_a, **_k: None)
+    monkeypatch.setattr(backend, "_mods_are_down", lambda _m: False)
+    sent = []
+    monkeypatch.setattr(backend, "_send_abs",
+                        lambda *a: sent.append(a) or True)
+
+    assert backend.click((10, 20), (act.VK_LSHIFT, act.VK_LCONTROL)) is False
+    assert sent == [], "it sent the click without the modifier"
+
+
+def test_a_modifier_that_IS_down_clicks_normally(monkeypatch):
+    import bridge.act as act
+
+    backend = act.SendInputBackend()
+    monkeypatch.setattr(backend, "move", lambda _p: True)
+    monkeypatch.setattr(backend, "_normalise", lambda _p: (0, 0))
+    monkeypatch.setattr(backend, "_mods", lambda *_a, **_k: None)
+    monkeypatch.setattr(act.time, "sleep", lambda *_a, **_k: None)
+    monkeypatch.setattr(backend, "_mods_are_down", lambda _m: True)
+    sent = []
+    monkeypatch.setattr(backend, "_send_abs",
+                        lambda *a: sent.append(a) or True)
+
+    assert backend.click((10, 20), (act.VK_LSHIFT,)) is True
+    assert len(sent) == 2, "down and up"
+
+
+def test_an_unmodified_click_is_never_gated(monkeypatch):
+    """Only a MODIFIED click can be turned into a different action by a
+    missing modifier, so the guard may not touch the ordinary path."""
+    import bridge.act as act
+
+    backend = act.SendInputBackend()
+    monkeypatch.setattr(backend, "move", lambda _p: True)
+    monkeypatch.setattr(backend, "_normalise", lambda _p: (0, 0))
+    monkeypatch.setattr(act.time, "sleep", lambda *_a, **_k: None)
+
+    def _boom(_m):
+        raise AssertionError("the guard ran for a click with no modifiers")
+
+    monkeypatch.setattr(backend, "_mods_are_down", _boom)
+    monkeypatch.setattr(backend, "_send_abs", lambda *_a: True)
+    assert backend.click((10, 20)) is True
+
+
 def test_a_snuff_that_lands_sends_exactly_one_click(monkeypatch, tmp_path):
     """The documented gesture, when it works, is one click and nothing else."""
     r, _seen = _torch_runner(monkeypatch, tmp_path, [100.0, 0.0])
     assert r._snuff_torch() is True
-    assert len(_torch_clicks(r)) == 1
+    # 100 is four steps of 25, sent as ONE plan at ONE candidate. CTRL
+    # never reaches SDL, so there is no one-click gesture to try first:
+    # measured 2026-09-21, a CTRL+SHIFT click moved
+    # `RADIANT LIGHT ( 100 )` to `DIM LIGHT ( 75 )`.
+    assert len(_torch_clicks(r)) == 4
 
 
 def test_a_snuff_that_only_dropped_a_step_is_finished_by_shift_clicks(
@@ -4258,8 +4548,10 @@ def test_a_snuff_that_only_dropped_a_step_is_finished_by_shift_clicks(
     clicks = _torch_clicks(r)
     assert len(clicks) > 1, "it believed the one-click gesture"
     # The first is the full snuff (SHIFT+CTRL), the rest are SHIFT only.
-    assert set(clicks[0].mods) == {act.VK_SHIFT, act.VK_CONTROL}
-    assert all(tuple(c.mods) == (act.VK_SHIFT,) for c in clicks[1:])
+    # EVERY click is the SHIFT reduce now. CTRL+SHIFT measured -25, the
+    # same as SHIFT, so it bought nothing and only made the first click
+    # look unlike the rest.
+    assert all(tuple(c.mods) == (act.VK_LSHIFT,) for c in clicks)
 
 
 def test_a_meter_that_stops_moving_stops_the_loop(monkeypatch, tmp_path):
@@ -4281,7 +4573,8 @@ def test_the_sweep_stops_at_the_point_that_answers(monkeypatch, tmp_path):
     working widget gets un-found."""
     r, _seen = _torch_runner(monkeypatch, tmp_path, [100.0, 0.0])
     assert r._snuff_torch() is True
-    assert len(_torch_clicks(r)) == 1
+    assert len(_torch_clicks(r)) == 4, (
+        "one ladder at ONE candidate, not a sweep across points")
 
 
 def test_the_winning_point_is_remembered_for_the_next_snuff(monkeypatch,
@@ -4306,7 +4599,8 @@ def test_a_lagging_save_does_not_refute_a_working_click(monkeypatch, tmp_path):
     r, _seen = _torch_runner(monkeypatch, tmp_path,
                              [100.0, 100.0, 100.0, 0.0])
     assert r._snuff_torch() is True
-    assert len(_torch_clicks(r)) == 1, "it clicked again on a stale reading"
+    assert len(_torch_clicks(r)) == 4, (
+        "it sent a SECOND ladder on a stale reading")
 
 
 def test_the_modifier_is_held_longer_than_a_frame():
@@ -4330,6 +4624,26 @@ def test_an_unreadable_torch_refuses_rather_than_clicking_blind(
     assert len(_torch_clicks(r)) <= 1
 
 
+def test_the_modifier_dwell_is_long_enough_for_CTRL_to_reach_SDL():
+    """**The dwell decides WHICH ACTION the game performs, not how reliably
+    it performs one.** Measured live 2026-09-21 at the torch dial, against
+    DD's own light tooltip:
+
+        0.12s: plain +25, SHIFT +25 (!), CTRL+SHIFT -25 (!)
+        0.35s: plain +25, SHIFT -25,     CTRL+SHIFT -100
+
+    At the short dwell every gesture degraded one step toward "no modifier",
+    so the bridge raised the torch while its log said it lowered it, spending
+    a torch each time. `GetAsyncKeyState` reported the keys DOWN throughout --
+    the OS was not behind, SDL was -- so no guard catches this and only the
+    hold does.
+    """
+    from bridge.actuation.keys import MOD_DWELL
+
+    assert MOD_DWELL >= 0.30, (
+        "below ~0.3s CTRL stops reaching SDL and CTRL+SHIFT silently "
+        "degrades into SHIFT, which is a different action on this widget")
+
 def test_plan_reduce_torch_is_shift_only_and_refuses_a_bad_count(monkeypatch,
                                                                  tmp_path):
     import bridge.act as act
@@ -4337,7 +4651,11 @@ def test_plan_reduce_torch_is_shift_only_and_refuses_a_bad_count(monkeypatch,
                                      full_pack="abandon")
     plan = act.plan_reduce_torch(r.resolved, 3)
     assert plan.actionable and len(plan.steps) == 3
-    assert all(tuple(s.mods) == (act.VK_SHIFT,) for s in plan.steps)
+    assert all(tuple(s.mods) == (act.VK_LSHIFT,) for s in plan.steps), (
+        "SHIFT+click is the -25 reduce, measured live 2026-09-21 off DD's "
+        "own tooltip at a 0.35s modifier hold. At the old 0.12s dwell the "
+        "same click read as UNMODIFIED and raised the light instead, which "
+        "is why `MOD_DWELL` carries the evidence.")
     assert not act.plan_reduce_torch(r.resolved, 0).actionable
     assert not act.plan_reduce_torch(r.resolved, -1).actionable
     assert not act.plan_reduce_torch(r.resolved, True).actionable
@@ -4386,6 +4704,202 @@ def test_retreat_is_planned_as_the_raid_HUD_X_and_a_confirm(resolved):
     assert [st.screen for st in plan.steps] == [resolved.raid_abandon_quest,
                                                 resolved.modal_ok]
     assert plan.steps[0].after >= 1.0, "no time for the dialog to be drawn"
+
+
+def _banner_runner(monkeypatch, armed=False):
+    """A runner whose screen is showing the quest-complete banner."""
+    from bridge import screen as screen_mod
+    r = _runner(monkeypatch, armed=armed, confirm=False)
+    monkeypatch.setattr(screen_mod, "grab", lambda w: object())
+    monkeypatch.setattr(screen_mod, "recognise", lambda i, **k: "quest_complete")
+    monkeypatch.setattr(r, "_focused_or_wait", lambda: True)
+    return r
+
+
+def test_the_BANNER_is_answered_by_the_priced_verdict(monkeypatch, capsys):
+    """**The banner is the game saying the objective is met.**
+
+    DD finishes an explore quest at 90% of rooms (`quest.types.json`), so
+    `Quest Complete!` is drawn while `RoutePlan.targets` is still full --
+    live 2026-09-06, 7 of 8 rooms. `run.py`'s raid-end branch only ran once
+    targets emptied, so in that window the actuator had nothing priced and
+    fell back to "CONTINUE, because the route wants somewhere to go" -- which
+    is not a decision about the raid at all. It continued into a won raid
+    with an afflicted party exactly as readily as with a fresh one.
+
+    `raid_end_priced` is that verdict computed anyway. It arms nothing; only
+    this branch reads it, and only when the GAME has drawn the banner.
+    """
+    class _Advice:
+        raid_end = ""
+        raid_end_priced = "return"
+        next_step = "coAB"
+
+    r = _banner_runner(monkeypatch)
+    assert r._end_raid(_Advice()) is True
+    out = capsys.readouterr().out
+    assert "prices this as RETURN" in out
+    assert "would RETURN from the raid" in out
+
+
+def test_without_a_priced_verdict_the_banner_still_gets_an_answer(monkeypatch,
+                                                                  capsys):
+    """The fallback has to survive: an older caller, or a poll with no route,
+    leaves `raid_end_priced` empty and the banner still has to be answered --
+    a modal left up swallows every later input. CONTINUE is the recoverable
+    direction, because `plan_leave_raid` can end the raid afterwards."""
+    class _Advice:
+        raid_end = ""
+        raid_end_priced = ""
+        next_step = "coAB"
+
+    r = _banner_runner(monkeypatch)
+    assert r._end_raid(_Advice()) is True
+    out = capsys.readouterr().out
+    assert "would CONTINUE from the raid" in out
+
+
+def test_a_REFUSED_fit_point_falls_back_to_the_save_ordered_search(monkeypatch):
+    """The asymmetry a live raid stalled on.
+
+    When the fit produces NO point, `_ask_the_game_which_cell` runs and ends
+    in a documented last resort -- *"a click that misses costs one poll,
+    never clicking costs the raid"*. When the fit produces a point the game
+    then REFUSES, there was no such path: the branch refused and returned,
+    every poll, forever.
+
+    Live 2026-09-20, the last thing the overnight loop did before it was
+    stopped: `the game offers no move at or near rooE - not clicking blind`,
+    then six identical room plans and the stall line. The party had somewhere
+    to go and the layer that knows how to find it was never asked.
+
+    Asserted on the SOURCE of the branch rather than by driving the whole map
+    path, which needs a panel, a fit and a hover backend: what must not
+    regress is that the refusal is no longer the last thing that happens.
+    """
+    import inspect
+
+    from bridge import act
+
+    src = inspect.getsource(act.ActRunner._show_map)
+    i = src.index("the game offers no move at or ")
+    before = src[:i]
+    # The save-ordered search has to be attempted BEFORE the refusal, in the
+    # same branch -- not merely present elsewhere in the method.
+    j = before.rindex("if not offered:")
+    assert "_ask_the_game_which_cell" in before[j:], (
+        "the refused-fit branch refuses without asking the save-ordered "
+        "search first")
+
+
+def test_a_STUCK_raid_can_be_asked_to_explain_itself_again(monkeypatch, capsys):
+    """`_say_once` is right for a turn that eventually gets played and wrong
+    for a raid that is stuck.
+
+    Live 2026-09-20: six identical room plans, the stall line firing
+    correctly, and the actual cause -- `the game offers no move at or near
+    rooE` -- sixty lines earlier, looking unrelated. The log showed room
+    plans with no `[act]` line under them at all and read as though the
+    actuator had died; it was refusing for the same reason every 25 s and
+    being swallowed.
+
+    `explain_again` is called ONCE, at the give-up bound, so the noise
+    `_say_once` exists to prevent does not come back.
+    """
+    r = _runner(monkeypatch, armed=True, confirm=False)
+    r._say_once("some-tag", "  [act] the first time")
+    r._say_once("some-tag", "  [act] the first time")
+    out = capsys.readouterr().out
+    assert out.count("the first time") == 1, "say_once stopped working"
+
+    r.explain_again()
+    r._say_once("some-tag", "  [act] the first time")
+    out = capsys.readouterr().out
+    assert out.count("the first time") == 1, (
+        "explain_again did not clear the suppression")
+
+
+def test_the_stall_line_asks_the_actuator_before_it_prints(monkeypatch):
+    """The wiring, pinned: `run.py` gives `Session.on_stall` the runner's
+    `explain_again`, and the poll loop calls it at the bound. Without the
+    call the stall report names nothing, which is the state it was in when
+    it was first written."""
+    import inspect
+
+    from bridge import run
+
+    main_src = inspect.getsource(run.main)
+    assert "session.on_stall = runner.explain_again" in main_src
+
+    watch = inspect.getsource(run.watch) if hasattr(run, "watch") else ""
+    src = watch or inspect.getsource(run)
+    i = src.index("ROOM_STUCK_GIVE_UP:")
+    j = src.index("ROOM_STUCK_LINE", i)
+    assert "on_stall" in src[i:j], (
+        "the give-up branch prints the stall line without asking the "
+        "actuator to explain itself first")
+
+
+def test_the_raid_EXIT_and_the_retreat_are_DIFFERENT_controls(resolved):
+    """**They are 40 px apart and confusing them cost a live raid.**
+
+    This test used to assert the opposite -- that the exit and the retreat
+    aim at the same pixel -- on the reading that the HUD puts one control
+    there with two meanings. Measured live 2026-09-21 with the quest
+    complete: a click on `RAID_ABANDON_QUEST` (the scroll) moved nothing over
+    a six-second watch, and a click on `RAID_QUEST_SEAL` (the red wax seal
+    above it) reached `raid_results` within two seconds. Fran, watching the
+    first one: *"do not click the scroll, click the red symbol"*.
+
+    `plan_retreat` keeps the scroll -- that one is the in-combat retreat and
+    the game's own `[pc]str_help_raid_combat_4` names it.
+    """
+    import bridge.act as act
+
+    leave = act.plan_leave_raid(resolved)
+    assert leave.actionable, leave.refusal
+    assert [st.screen for st in leave.steps] == [resolved.raid_quest_seal]
+
+    retreat = [st.screen for st in act.plan_retreat(resolved).steps]
+    assert retreat[0] == resolved.raid_abandon_quest
+    assert resolved.raid_quest_seal != resolved.raid_abandon_quest, (
+        "the seal and the scroll must not resolve to the same pixel")
+
+
+def test_leaving_the_raid_sends_ONE_click_and_no_blind_confirm(resolved):
+    """With the objective met the seal goes straight to the results page, so
+    there is nothing to confirm -- measured. A `MODAL_OK` sent as part of the
+    plan would land in whatever is drawn instead, which is why the confirm is
+    a RESPONSE to seeing a dialog (`_leave_raid`) rather than a second step
+    here."""
+    import bridge.act as act
+
+    plan = act.plan_leave_raid(resolved)
+    assert len(plan.steps) == 1, [st.label for st in plan.steps]
+
+    src = __import__("inspect").getsource(act.ActRunner._leave_raid)
+    assert "now in self.CONFIRM_SCREENS" in src, "no conditional confirm at all"
+    # The family, not one name: the retreat confirm reads as
+    # `embark_underprepared` -- same modal frame, different dialog -- and
+    # gating on the exact name left it standing with the party in the
+    # dungeon (measured 2026-09-21).
+    assert "embark_underprepared" in act.ActRunner.CONFIRM_SCREENS
+
+
+def test_leaving_the_raid_refuses_without_a_calibrated_seal():
+    """A missing point must refuse, never resolve to (0, 0) -- the top-left
+    corner is where this control lives, so a degenerate click would land
+    somewhere plausible and irreversible."""
+    import bridge.act as act
+
+    class _NoPoints:
+        raid_quest_seal = None
+        raid_abandon_quest = None
+        modal_ok = None
+
+    plan = act.plan_leave_raid(_NoPoints())
+    assert not plan.actionable
+    assert "seal" in plan.refusal
 
 
 def test_the_retreat_click_and_its_CONFIRM_are_one_plan(resolved):
@@ -4582,7 +5096,12 @@ def test_the_door_is_tried_more_than_once_with_a_step_between(monkeypatch,
     assert sum("stepping back and trying again" in m for m in said) \
         == act.DOOR_TRIES - 1, said
     tail = keys[keys.index(act.VK_W):]
-    assert tail == [act.VK_W, act.VK_A, act.VK_W, act.VK_A, act.VK_W], tail
+    assert tail == [act.VK_W] + [act.VK_A, act.VK_W] * (act.DOOR_TRIES - 1), tail
+    # The first back-off is two hero widths, not a full walk step: the door
+    # opens for the FRONT two heroes (Fran, 2026-09-26).
+    backs = [st for st in r.actuator.backend.sent
+             if st.kind == "key" and st.vk == act.VK_A]
+    assert backs[-(act.DOOR_TRIES - 1)].hold == act.DOOR_BACKOFF[0]
 
 
 def test_the_door_is_not_retried_once_the_party_is_through(monkeypatch,
@@ -5409,19 +5928,98 @@ def test_an_unreadable_save_is_not_a_witness(monkeypatch):
     assert (level, witnessed) == (70.0, False)
 
 
-def test_the_SWEEP_stops_at_the_first_thing_it_cannot_tell():
+def test_a_SILENT_save_no_longer_stops_the_snuff_after_one_click(monkeypatch,
+                                                                 tmp_path):
+    """A partial snuff is worth almost nothing, and one click is partial.
+
+    The old loop required a SAVE WRITE between every reduction click. A snuff
+    is sent inside a hero's turn, so the next write is the swing that has not
+    happened yet -- the first read came back unwitnessed and the whole thing
+    stopped after one click. Live 2026-09-20 that left the torch at 20 while
+    the log reported it had not moved at all. Fran: *"it only clicks once ...
+    usually you want full snuff of the torch for best value"*.
+
+    The bracket is why it matters: at 1-25 a fight pays +8 treasure draws and
+    +15% gold, at 0 it pays +12 and +30%. Stopping one step short gives up the
+    bracket the play exists to reach.
+    """
+    import bridge.act as act
+
+    # 100, then nothing ever again: the save is silent from the first read on,
+    # which is the exact shape of a snuff sent mid-turn.
+    r, _seen = _torch_runner(monkeypatch, tmp_path, [100.0])
+    r._snuff_torch()
+    clicks = _torch_clicks(r)
+    reductions = [c for c in clicks if tuple(c.mods) == (act.VK_LSHIFT,)]
+    assert len(reductions) >= 3, (
+        f"a silent save stopped the snuff after {len(clicks)} click(s); "
+        f"100 -> 0 is four steps of {act.TORCH_STEP:.0f}")
+    assert len(clicks) <= act.TORCH_MAX_CLICKS + 1, "unbounded clicking"
+
+
+def test_the_SWEEP_stops_at_the_first_thing_it_cannot_tell(monkeypatch,
+                                                           tmp_path):
     """Every later candidate is read through the same silent save, so the
     remaining clicks buy nothing -- and each one is live input into a running
-    game. One run spent sixteen of them and learned nothing."""
-    import inspect
+    game. One run spent sixteen of them and learned nothing.
 
-    from bridge import act
+    Asserted on the CLICKS rather than on the source text. The previous
+    version compared the position of two lines inside `_snuff_torch`, which
+    made it a test of the layout of a method rather than of what the method
+    does -- and it broke the day the full-snuff burst was added without
+    anything about the property it guards having changed.
+    """
+    from bridge.layout import TORCH_CANDIDATES
 
-    src = inspect.getsource(act.ActRunner._snuff_torch)
-    body = chr(10).join(ln for ln in src.splitlines()
-                        if not ln.lstrip().startswith("#"))
-    assert "if not witnessed:" in body
-    assert body.index("if not witnessed:") < body.index("is not the torch widget")
+    # A torch that never moves, on a save that is never rewritten: every
+    # candidate is unknowable, so only the first may be clicked at all.
+    r, _seen = _torch_runner(monkeypatch, tmp_path, [75.0])
+    assert r._snuff_torch() is False
+    clicks = _torch_clicks(r)
+    assert clicks, "it did not try at all"
+    where = {tuple(c.screen) for c in clicks}
+    assert len(where) == 1, (
+        f"it swept {len(where)} candidates through a silent save, "
+        f"of {len(TORCH_CANDIDATES)} available")
+    assert tuple(r._torch_order()[0][1]) in where
+
+
+def test_a_RELIGHT_SENDS_ENOUGH_TORCHES_TO_CLEAR_THE_FLOOR(resolved):
+    """One `T` is 25 light and the radiant floor is 76.
+
+    The relight plan sent exactly one press whatever the level was, so a party
+    that had just snuffed to 0 walked into the next fight at 25 -- with the
+    log reporting a relight had been sent, the game agreeing, and the hard
+    torch floor every other layer is built on quietly broken. Fran,
+    2026-09-20: *"try to never combat on under 75 torch, it started a combat
+    at 0 torch"*.
+
+    `RoomAdvice.torch_count` carries what the decision layer worked out, and
+    it is already capped by what the pack holds -- so this plan never promises
+    light the party cannot buy.
+    """
+    import bridge.act as act
+
+    class _Advice:
+        torch = "relight"
+        torch_count = 4
+        next_step = ""
+        next_room = ""
+        curio_area = curio_id = curio_action = curio_item = ""
+        raid_end = ""
+        empty = False
+
+    plan = act.plan_room(_Advice(), None, area="coAB")
+    assert plan.actionable, plan.refusal
+    assert plan.layer == "torch"
+    assert [st.vk for st in plan.steps] == [act.VK_T] * 4
+    assert all(st.kind == "key" for st in plan.steps), "a torch is a KEYBIND"
+
+    # And an advice with no count behaves exactly as it always did.
+    class _Old(_Advice):
+        torch_count = 0
+
+    assert len(act.plan_room(_Old(), None, area="coAB").steps) == 1
 
 
 def test_a_RELIGHT_is_sent_exactly_once():
@@ -5477,3 +6075,50 @@ def test_no_verdict_means_no_retreat_is_planned_ANYWHERE(resolved):
 
     plan = act.plan_battle(_retreat_update(False, slot=1), resolved, bar=None)
     assert "LEAVE" not in plan.why
+
+
+# -- provisions on their triggers (Fran, 2026-09-25) ------------------------
+
+
+def test_a_provision_is_a_hero_click_then_a_right_click_sent_once(monkeypatch):
+    import bridge.screen as screen_mod
+    from bridge.run import RoomAdvice
+    r = _runner(monkeypatch)
+    monkeypatch.setattr(screen_mod, "panel", lambda img, raid: "inventory")
+    monkeypatch.setattr(r, "_raid_is_running", lambda: True, raising=False)
+    monkeypatch.setattr(r, "_provision_slot", lambda item: ((900, 600), "slot 2"))
+    counts = iter([2, 1, 1, 1])
+    monkeypatch.setattr(r, "_provision_count", lambda item: next(counts, 1))
+    advice = RoomAdvice(provisions=((7, 2, "bandage", "bleeding"),))
+    r._use_provisions(advice, "rooA")
+    sent = r.actuator.backend.sent
+    kinds = [s.kind for s in sent if s.kind in ("click", "rclick")]
+    assert kinds == ["click", "rclick"], kinds
+    # the same cure in the same area is not sent twice
+    r._use_provisions(advice, "rooA")
+    assert [s.kind for s in r.actuator.backend.sent if s.kind in ("click", "rclick")] == kinds
+
+
+def test_food_the_pack_did_not_lose_marks_the_hero_full(monkeypatch):
+    import bridge.screen as screen_mod
+    from bridge.run import RoomAdvice
+    r = _runner(monkeypatch)
+    monkeypatch.setattr(screen_mod, "panel", lambda img, raid: "inventory")
+    monkeypatch.setattr(r, "_raid_is_running", lambda: True, raising=False)
+    monkeypatch.setattr(r, "_provision_slot", lambda item: ((900, 600), "slot 3"))
+    monkeypatch.setattr(r, "_provision_count", lambda item: 12)   # never eaten
+    advice = RoomAdvice(provisions=((7, 4, "food", "3/27 HP"),) * 3)
+    r._use_provisions(advice, "coAB")
+    rclicks = [s for s in r.actuator.backend.sent if s.kind == "rclick"]
+    assert len(rclicks) == 1, "it kept feeding a hero who would not eat"
+    assert 7 in r._food_full
+
+
+def test_a_completed_fight_lets_a_full_hero_eat_again(monkeypatch):
+    """Fran, 2026-09-28: fullness lasts until the next completed combat."""
+    r = _runner(monkeypatch)
+    r._food_full = {7}
+    r._provisions_sent = {("coAB", 7, "food"): 4, ("coAB", 7, "bandage"): 1}
+    r._fed_again_after_fight()
+    assert r._food_full == set()
+    assert r._provisions_sent == {("coAB", 7, "bandage"): 1}

@@ -485,11 +485,38 @@ def test_the_blacksmith_has_exactly_two_rows():
     assert TL.blacksmith_node(0)[1] < TL.blacksmith_node(1)[1]
 
 
-def test_the_guild_and_blacksmith_are_declared_unmeasured():
-    """The stage coach is why: its derived tree points landed in a margin
-    until a live frame moved them by (133.5, 35.3), and no tree was drawn at
-    all until the building crest was clicked."""
-    assert TL.GUILD_MEASURED is False
+def test_the_guild_tree_is_MEASURED_and_the_files_were_only_half_right():
+    """**Measured live 2026-09-21, and the residual the coach warned about
+    was real.** The shipped fields compose to client (427, 65) for row 0 and
+    the panel draws it at (757, 198) -- 330x133 out, the same shape of error
+    the stage coach needed (133.5, 35.3 design) a frame to correct.
+
+    What the files got RIGHT is the pitch, which is why the origin alone
+    comes from the frame: `skill_spacing 0 91` is 60.7 client against a
+    measured 60.8 down the rows, and `requirement_spacing 75 0` is 50.0
+    against a measured 50.2 across the ranks.
+
+    Proved by spending rather than by eye: clicking row 0 for Dismas took the
+    wallet 10,865 -> 9,865, the exact 1,000 `embarkplan` prices an unlock at.
+    """
+    assert TL.GUILD_MEASURED is True
+    row0 = TL.guild_skill_node(0, 0)
+    assert (round(row0[0] * 1280), round(row0[1] * 720)) == (757, 198)
+    row6 = TL.guild_skill_node(6, 0)
+    # Seven rows at the measured pitch, and the pitch is the shipped one.
+    assert abs((row6[1] - row0[1]) * 720 / 6 - 60.8) < 0.5
+    assert TL.guild_skill_node(7, 0) is None, "there is no eighth row"
+
+
+def test_rank_0_is_the_SKILL_and_the_rest_are_upgrade_columns():
+    """Rank 0 is the 1,000-gold unlock -- the skill's own icon -- and the
+    four columns right of it are the building-gated rank upgrades. Confusing
+    them spends the unlock budget on a node nothing can buy yet."""
+    skill = TL.guild_skill_node(2, 0)
+    rank1 = TL.guild_skill_node(2, 1)
+    assert skill[1] == rank1[1], "same row"
+    assert rank1[0] > skill[0], "the ranks are to the RIGHT of the skill"
+    assert round(rank1[0] * 1280) == 823
 
 
 # --- the coach point, and the screen that swallows it (2026-09-05) -------

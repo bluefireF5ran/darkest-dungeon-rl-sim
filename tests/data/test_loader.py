@@ -319,6 +319,54 @@ def test_csv_hero_roster():
     print(f"  CSV heroes: {len(rows)} entries")
 
 
+def test_a_QUESTION_MARK_target_prefix_survives_the_parse():
+    """`.target ?1234` dropped the WHOLE key, and it is shipped on a vanilla
+    hero.
+
+    `decode_position_notation` was taught about `?1234` when the modded corpus
+    turned up 88 of them -- but the value never reached it. The unquoted-value
+    character class carried `@` and `~` and not `?`, so the value alternative
+    failed to match, and an unmatchable value drops the whole key rather than
+    arriving malformed. `target` was therefore ABSENT from the record,
+    decoded as `[]`, and the skill could not be aimed at anything.
+
+    Not a mod-only shape: the **Arbalest's blindfire** (all five levels, a
+    base-game hero) and the **Musketeer's sidearm** both carry it, and both
+    are rank-4 shots the real game aims at any enemy rank.
+    """
+    from data.darkest_parser import DarkestParser
+
+    line = ('combat_skill: .id "blindfire" .level 4 .type "ranged" .atk 95% '
+            '.dmg -10% .crit 4% .launch 4321 .target ?1234 .is_crit_valid '
+            'True  .effect "Arb Self Speed 5"')
+    rec = DarkestParser._parse_line(line)
+    assert rec is not None
+    assert "target" in rec, "the whole key vanished again"
+    assert rec["target"] == "?1234"
+    assert DarkestParser.decode_position_notation(rec["target"]) == [1, 2, 3, 4]
+    # The keys either side must be unharmed: a greedy value would eat the
+    # next key's name, which is what the negative lookahead prevents.
+    assert rec["launch"] == 4321
+    assert rec["is_crit_valid"] is True
+    assert rec["effect"] == "Arb Self Speed 5"
+
+
+def test_the_two_SHIPPED_skills_with_that_prefix_can_be_aimed():
+    """The end-to-end half: the store, not the regex. A parse fix that does
+    not reach `SkillLevelData.target` has fixed nothing."""
+    store = get_store()
+    for hero, sid in (("arbalest", "blindfire"), ("musketeer", "sidearm")):
+        h = store.heroes.get(hero)
+        if h is None:
+            continue                     # DLC not installed; not a failure
+        sk = next((s for s in h.skills if s.id == sid), None)
+        assert sk is not None, f"{hero} has no {sid}"
+        for lv, data in sk.levels.items():
+            assert data.target == [1, 2, 3, 4], (
+                f"{hero}/{sid} level {lv} targets {data.target}")
+            assert not data.is_aoe, "'?' is not the AoE marker; '~' is"
+
+
 if __name__ == "__main__":
     print("=== Data Layer Tests ===\n")
     for name, func in sorted(globals().items()):

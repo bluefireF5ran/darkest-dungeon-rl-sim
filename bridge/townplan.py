@@ -45,7 +45,8 @@ from __future__ import annotations
 
 import sys
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from functools import lru_cache
 from itertools import combinations
 from math import comb
 from pathlib import Path
@@ -53,6 +54,7 @@ from typing import Iterable, Optional, Sequence
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from bridge import hero_roles
 from bridge.town_state import Recruit, RosterHero, TownState
 from data.town_costs import load_stress_treatments
 from data.heirlooms import (UpgradeNode, crest_values, load_building_upgrades,
@@ -89,17 +91,116 @@ from data.paths import GAME_DIR
 # shipped starting heirlooms are down to (10, 8, 0, 2) and `rostersize.b`
 # is unreachable, so `MAX_RANKS_PER_VISIT` is not what bounds this.
 #
-# `upgraded_recruits` is absent for a harder reason: it requires guild and
-# blacksmith ranks the first weeks cannot pay for, so `next_nodes` refuses it
-# and listing it would put an unbuyable line in every town report.
-UPGRADE_PRIORITY = (
+# `upgraded_recruits` requires guild and blacksmith ranks the first weeks
+# cannot pay for, so `next_nodes` refuses it until they are owned -- and it
+# is therefore listed AFTER those trees, not beside its coach siblings.
+# **Fran's building order, PLAYBOOK 7.4 (2026-09-23):** the coach first ("fresh
+# blood for cheap expeditions, and level 1 onwards come with all skills"),
+# then guild and blacksmith ("important for stats when resolve level
+# increases"), the sanitarium ("long term value on quirks and removing
+# diseases"), the survivalist ("less useful as base version is already
+# fine"), and the abbey last. **The tavern never**: it can cost a hero trinkets.
+COACH_FIRST_PRIORITY = (
     ("stage_coach", "stage_coach.numrecruits"),
     ("stage_coach", "stage_coach.rostersize"),
+    # **Experienced Recruits comes right AFTER its prerequisites** (Fran,
+    # 2026-09-25). Shipped data: `upgraded_recruits.a` needs rank b of
+    # `guild.skill_levels`, `blacksmith.weapon` AND `blacksmith.armour`, each
+    # later rank one more of each. Listed before them it was checked while
+    # they were still unowned and skipped every visit; listed after, one
+    # visit can buy the chain and then the coach rank it opens.
+    ("guild", "guild.skill_levels"),
+    ("blacksmith", "blacksmith.weapon"),
+    ("blacksmith", "blacksmith.armour"),
+    ("stage_coach", "stage_coach.upgraded_recruits"),
+    ("guild", "guild.cost"),
+    ("blacksmith", "blacksmith.cost"),
+    # **The Nomad Wagon's discount, from Fran's own play** (recorded
+    # 2026-10-01/04, `archive/recordings/`): every crest he had after the
+    # coach went to `nomad_wagon.cost`, rank 3 -> 5 inside two sessions, and
+    # the 2026-09-28 audit counted 9 Nomad Wagon ranks in his campaign against
+    # 0 in the bridge's. PLAYBOOK 7.4's list does not name the wagon; his
+    # hands do. Trinkets are the gear the bridge equips every embark.
+    ("nomad_wagon", "nomad_wagon.cost"),
+    ("sanitarium", "sanitarium.slots"),
+    ("sanitarium", "sanitarium.cost"),
+    ("sanitarium", "sanitarium.disease_quirk_cost"),
+    ("camping_trainer", "camping_trainer.cost"),
+    ("abbey", "abbey.meditation"),
+    ("abbey", "abbey.prayer"),
+    ("abbey", "abbey.flagellation"),
 )
+#: **Guild and Blacksmith before the Coach** (Fran, 2026-10-12, on
+#: docs/CAMPAIGN_SIM.md E16: 80 simulated campaigns per arm, deaths null, a
+#: Champion 2-7 weeks earlier for about one boss fewer -- *"Lets go with smith
+#: first, but we need to manage the vanilla roster size, not modded"*). The
+#: second half of that is `priority_for`: a FULL vanilla roster puts
+#: `rostersize` back in front. Everything else keeps PLAYBOOK 7.4's place.
+_SMITH_TREES = ("guild.skill_levels", "blacksmith.weapon", "blacksmith.armour")
+UPGRADE_PRIORITY = (tuple(e for e in COACH_FIRST_PRIORITY if e[1] in _SMITH_TREES)
+                    + tuple(e for e in COACH_FIRST_PRIORITY if e[1] not in _SMITH_TREES))
+ROSTER_SIZE_TREE = ("stage_coach", "stage_coach.rostersize")
+#: **A building spends nothing until it opens** (Fran, 2026-10-12: *"On the
+#: first weeks not all buildings are available"*). Each `.building.json`
+#: ships its gate -- the Guild and the Blacksmith after 3 quests, the Abbey
+#: after 2 -- so no upgrade, nurture rank, treatment or skill unlock is
+#: planned at a closed one. False is the world before, for an A/B.
+#: It also settles PLAYBOOK line 110 against smith first: after the tutorial
+#: (1 quest) the Guild and the Blacksmith are shut, so the smith-first walk
+#: spends the starting heirlooms at the coach, as the coach-first one did.
+BUILDING_GATES = True
+
+
+def closed(town: TownState, game_dir: Path = GAME_DIR) -> frozenset:
+    """The buildings this town cannot use yet (`data.town_costs.closed_buildings`)."""
+    if not BUILDING_GATES:
+        return frozenset()
+    from data.town_costs import closed_buildings                    # noqa: PLC0415
+    return closed_buildings(str(game_dir), getattr(town, "quests_finished", None),
+                            getattr(town, "highest_dungeon_level", None))
+
+
+def priority_for(heroes: int, offers: int, cap, priority=None) -> tuple:
+    """The walk for this visit: `rostersize` first when the roster cannot
+    take every recruit the coach offers (Fran's "hire all", 2026-09-23).
+
+    `cap` None (unreadable) or a modded cap that is never met leaves the
+    order alone, which is the "not modded" half of Fran's ruling: on his
+    Expanded Roster install the cap is ~1,000 and this never fires.
+    """
+    priority = UPGRADE_PRIORITY if priority is None else priority
+    if cap is None or heroes + offers <= cap or ROSTER_SIZE_TREE not in priority:
+        return tuple(priority)
+    return (ROSTER_SIZE_TREE,) + tuple(e for e in priority if e != ROSTER_SIZE_TREE)
+#: **A service discount stops at its first rank** (PLAYBOOK 4.1, Fran: *"La
+#: reduccion de coste de servicios esta bien a nivel 1, pero no merece
+#: maximizarla"*; the rest is saved for weapon, armour and skill ranks). Before
+#: 2026-10-10 the walk took every discount rank it could reach: in a 40-week
+#: simulated campaign `blacksmith.cost` b and c ate the 23 deeds that
+#: `blacksmith.weapon.b` (20) needed, and no weapon or armour rank past `a` was
+#: ever bought. `nomad_wagon.cost` is NOT here: Fran's own play buys it to rank
+#: 5 (recordings 2026-10-01/04), and it costs crests only.
+#:
+#: **OFF by default: measured null.** 80 simulated campaigns per arm, paired
+#: (docs/CAMPAIGN_SIM.md, "heirlooms"): dead +0.3 +- 2.2 / +3.7 +- 1.9, gear
+#: gold unchanged -- the Stage Coach, above the Blacksmith in the priority,
+#: takes the deeds instead, and gear is short of GOLD, not of building ranks.
+#: `1` is the PLAYBOOK reading, for Fran to rule on; `None` is the shipped walk.
+SERVICE_DISCOUNT_MAX_RANKS = None
+SERVICE_DISCOUNT_TREES = frozenset({
+    "guild.cost", "blacksmith.cost", "sanitarium.cost",
+    "sanitarium.disease_quirk_cost", "camping_trainer.cost",
+})
+
+#: Never upgraded and never used for treatment -- PLAYBOOK 7.4.
+NEVER_BUILDINGS = frozenset({"tavern"})
 
 # The pre-2026-09-01 path, kept named so an arm can be run against it and so
 # the paragraph above stays attached to the thing it is about.
-UPGRADE_PRIORITY_TOP_ONLY = UPGRADE_PRIORITY[:1]
+#: The order as shipped, for an experiment that reorders `UPGRADE_PRIORITY`
+#: (`campaign.run --coach-first` restores `COACH_FIRST_PRIORITY`) to build from.
+SHIPPED_UPGRADE_PRIORITY = UPGRADE_PRIORITY
+UPGRADE_PRIORITY_TOP_ONLY = COACH_FIRST_PRIORITY[:1]
 # The old name for what is now the default. Kept so callers and tests that
 # named it explicitly still mean the same list.
 UPGRADE_PRIORITY_WITH_ROSTER = UPGRADE_PRIORITY
@@ -132,7 +233,11 @@ class Purchase:
 #:
 #: Falsifier: if a treated hero's stress is routinely seen dropping to 0 with
 #: heal left over, this is too low.
-TREAT_ABOVE = 50.0
+#
+# **Raised to 70 by Fran, PLAYBOOK 7.3 (2026-09-23):** heroes recover stress in
+# the Hamlet passively, so treating for 20 stress is waste; treat only above
+# about 70, only a hero worth keeping, and only with money to spare.
+TREAT_ABOVE = 70.0
 
 
 @dataclass(frozen=True)
@@ -145,6 +250,10 @@ class Treatment:
     cost: int
     stress_before: float
     heals: float
+    #: Roster guid, so the town layer can find the hero's row.
+    guid: int = 0
+    #: How many of the activity's slots are unlocked (leftmost first).
+    slots: int = 1
 
     def label(self) -> str:
         after = max(0.0, self.stress_before - self.heals)
@@ -166,6 +275,10 @@ class Hire:
     index: int
     opens: int = 0                 # curated comps this hire makes fieldable
     why: str = ""
+    #: A roster hero this hire REPLACES: the class band was full, and this
+    #: recruit beats that band's worst fodder (`_band_room`). Dismissed on the
+    #: same visit.
+    replaces: Optional[RosterHero] = None
 
     def label(self) -> str:
         return f"{self.recruit.label()}  [{self.why}]"
@@ -184,10 +297,21 @@ class TownAdvice:
     treatments: tuple[Treatment, ...] = ()
     wallet_after: dict = field(default_factory=dict)
     notes: tuple[str, ...] = ()
+    # Heroes worth letting go to make room -- planned, not yet actuated.
+    dismissals: tuple[RosterHero, ...] = ()
+    #: Ranks for the ONE hero being nurtured this visit (`plan_nurture`).
+    nurture: tuple = ()
+    #: Sanitarium treatments (`choose_sanitarium`). Planned, not actuated live:
+    #: the building's panel is not measured.
+    sanitarium: tuple = ()
 
     @property
     def empty(self) -> bool:
-        return not (self.purchases or self.hires or self.treatments)
+        """Nothing the live town would DO. `sanitarium` is left out: it is
+        reported, never actuated, so a visit with only that is a visit with
+        nothing to click."""
+        return not (self.purchases or self.hires or self.treatments
+                    or self.dismissals or self.nurture)
 
     def lines(self) -> list[str]:
         out = []
@@ -197,6 +321,10 @@ class TownAdvice:
             out.append(f"  HIRE {h.label()}")
         for t in self.treatments:
             out.append(f"  TREAT {t.label()}")
+        for v in self.sanitarium:
+            out.append(f"  SANITARIUM {v.label()} (not actuated live)")
+        for n in self.nurture:
+            out.append(f"  NURTURE {n.label()}")
         out.extend(f"  ({n})" for n in self.notes)
         return out or ["  nothing to do in town"]
 
@@ -272,9 +400,40 @@ def _recruit_quality(recruit: Recruit) -> tuple:
     and ranking on quality is exactly how a roster ends up as six strong
     classes that do not play together.
     """
-    return (recruit.resolve_xp,
-            recruit.weapon_rank + recruit.armour_rank,
-            -recruit.slot)
+    return recruit_value(recruit) + (recruit.resolve_xp,
+                                     recruit.weapon_rank + recruit.armour_rank,
+                                     -recruit.slot)
+
+
+#: Role order for hiring and for the band swap: what a hero is worth keeping.
+ROLE_RANK = {"fodder": 0, "nurture": 1, "invested": 2}
+#: A fodder recruit replaces a fodder resident only when its quirk score is
+#: this much higher -- a dismissal plus a hire is two actions and a churn, so
+#: "slightly better" is not worth it. A declared convention.
+SWAP_MARGIN = 2.0
+
+
+def recruit_value(recruit: Recruit, negative=None) -> tuple:
+    """`(role rank, nurture score)` for a coach offer -- the same model the
+    roster is judged by (`bridge/hero_roles.py`). An Experienced Recruit is
+    invested; a level-0 one with a great quirk for its class is nurture."""
+    score = hero_roles.nurture_score(recruit.hero_class, recruit.quirks or (),
+                                     negative=negative)
+    gear = int(recruit.weapon_rank or 0) + int(recruit.armour_rank or 0)
+    role = hero_roles.role_of(recruit_level(recruit), 0, score, gear)
+    return (ROLE_RANK[role], score)
+
+
+def resident_value(hr) -> tuple:
+    return (ROLE_RANK.get(getattr(hr, "role", "fodder"), 0),
+            float(getattr(hr, "nurture", 0.0)))
+
+
+def beats(recruit_v: tuple, resident_v: tuple) -> bool:
+    """Is a recruit worth dismissing this resident for?"""
+    if recruit_v[0] != resident_v[0]:
+        return recruit_v[0] > resident_v[0]
+    return recruit_v[1] >= resident_v[1] + SWAP_MARGIN
 
 
 # Above this many combinations the exact search is abandoned for the greedy
@@ -292,8 +451,128 @@ def _score_roster(shapes, have: Counter) -> tuple[int, int]:
     return (fieldable(shapes, have), -distance(shapes, have))
 
 
+#: Recruit rows the Stage Coach panel draws without scrolling.
+COACH_ROWS_VISIBLE = 7
+
 # The coach's two stores, and the one a drag can pay for.
 GOLD_RECRUIT_LISTING = "hero_recruit"
+
+
+#: Fran, 2026-09-26: *"maximum 4 heroes with the same level and class as a
+#: limit, to not overload the hamlet with the same classes"*. A 102-hero
+#: roster made every roster lookup a two-minute scroll. Refined the same
+#: night into BANDS (0-2 / 3-4 / 5+, caps 4/4/5) whose low cap tightens as
+#: the roster levels: `bridge/hero_roles.band_caps`. This is the top cap.
+MAX_PER_CLASS_LEVEL = 4
+
+
+@lru_cache(maxsize=1)
+def _thresholds() -> list:
+    try:
+        from bridge.live_state import load_resolve_thresholds  # noqa: PLC0415
+        return load_resolve_thresholds(GAME_DIR)
+    except Exception:                                          # noqa: BLE001
+        return []
+
+
+def recruit_level(recruit: Recruit, thresholds=None) -> int:
+    """The resolve level a recruit arrives at (Experienced Recruits sends
+    some in above 0), from its resolve XP and the shipped thresholds."""
+    from bridge.live_state import resolve_level_for_xp        # noqa: PLC0415
+    return resolve_level_for_xp(int(recruit.resolve_xp or 0),
+                                _thresholds() if thresholds is None else thresholds)
+
+
+def class_level_counts(town: TownState) -> Counter:
+    """Heroes per (class, level BAND)."""
+    return Counter((h.hero_class, hero_roles.band_of(h.resolve_level))
+                   for h in town.heroes or ())
+
+
+def band_caps(town: TownState, cap: Optional[int] = None) -> dict:
+    """`{band: cap}` for this roster; `cap` overrides every band (tests)."""
+    if cap is not None:
+        return {b: cap for b in hero_roles.BAND_CAPS}
+    return hero_roles.band_caps(hero_roles.mean_level(town))
+
+
+def _within_class_level_cap(town: TownState, offers, cap: Optional[int] = None):
+    """Drop offers that would put a (class, band) over its cap. Where several
+    offers compete for the room left, the better recruit is kept."""
+    kept, _swaps = _band_room(town, offers, cap)
+    return kept
+
+
+def _band_room(town: TownState, offers, cap: Optional[int] = None, roles=None):
+    """Which offers fit the class band caps, and whom each one replaces.
+
+    Fran, 2026-09-27: *"take into account the new hero quality to choose who
+    to add to the roster and who to not, specially with the limited 4 class
+    threshold slots"*. Best recruit first (`recruit_value`). With room in its
+    band it is kept; with the band FULL it is kept only if it `beats` the
+    band's worst free fodder, which is then dismissed for it. Returns
+    `(kept offers in row order, {row: resident it replaces})`."""
+    have = class_level_counts(town)
+    caps = band_caps(town, cap)
+    thresholds = _thresholds()
+    roles = hero_roles.roles(town) if roles is None else roles
+    pool: dict = {}
+    for h in town.heroes or ():
+        hr = roles.get(h.guid)
+        if (getattr(hr, "role", "fodder") == "fodder" and h.available
+                and not h.in_party):
+            key = (h.hero_class, hero_roles.band_of(h.resolve_level))
+            pool.setdefault(key, []).append(h)
+    for heroes in pool.values():
+        heroes.sort(key=lambda h: (resident_value(roles.get(h.guid)), -h.stress))
+    keyed = sorted(offers, key=lambda o: _recruit_quality(o[1]), reverse=True)
+    kept, taken, swaps = [], Counter(), {}
+    for row, r in keyed:
+        key = (r.hero_class, hero_roles.band_of(recruit_level(r, thresholds)))
+        if have[key] + taken[key] < caps[key[1]]:
+            kept.append((row, r))
+            taken[key] += 1
+            continue
+        worst = (pool.get(key) or [None])[0]
+        rv = recruit_value(r)
+        wv = resident_value(roles.get(worst.guid)) if worst is not None else None
+        if worst is not None and beats(rv, wv):
+            pool[key].pop(0)
+            kept.append((row, r))
+            swaps[row] = (worst, rv, wv)
+    return sorted(kept, key=lambda o: o[0]), swaps
+
+
+def cap_dismissals(town: TownState, keep=(), cap: Optional[int] = None,
+                   roles: Optional[dict] = None) -> list[RosterHero]:
+    """Who goes to bring every (class, band) down to its cap, worst first.
+
+    Only FODDER is dismissed (Fran, 2026-09-26: fodder is "better to dismiss
+    and recruit anew"; nurture and invested heroes are what the roster is
+    FOR). Within an over-full group the worst fodder goes first: lowest
+    nurture score, no trinket before a worn one (nothing to strip), then the
+    most stressed. Never a hero in the party, in a building, or in `keep` --
+    so a group can stay over the cap rather than lose someone who matters."""
+    keep = set(keep)
+    caps = band_caps(town, cap)
+    roles = hero_roles.roles(town) if roles is None else roles
+    groups: dict = {}
+    for h in town.heroes or ():
+        groups.setdefault((h.hero_class, hero_roles.band_of(h.resolve_level)),
+                          []).append(h)
+    out = []
+    for (_cls, band), heroes in groups.items():
+        surplus = len(heroes) - caps[band]
+        if surplus <= 0:
+            continue
+        free = [h for h in heroes
+                if h.guid not in keep and h.available and not h.in_party
+                and getattr(roles.get(h.guid), "role", "fodder") == "fodder"]
+        free.sort(key=lambda h: (getattr(roles.get(h.guid), "nurture", 0.0),
+                                 bool(getattr(h.hero, "trinkets", None)),
+                                 -h.stress))
+        out.extend(free[:surplus])
+    return sorted(out, key=lambda h: (h.hero_class, h.resolve_level, -h.stress))
 
 
 def choose_recruits(town: TownState, shapes, limit: int = 2) -> list[Hire]:
@@ -321,14 +600,58 @@ def choose_recruits(town: TownState, shapes, limit: int = 2) -> list[Hire]:
     # panel drew one row, and two hires dragged from empty space below it. The
     # index carried through to the drag is therefore `r.row`, the position
     # within the drawn listing.
+    # **Only rows the coach DRAWS.** Seven rows fit the panel (67 px apart
+    # from y 147; the list ends near y 600) and the list's scroll is not
+    # measured. With 24 offers, a hire from row 7 dragged from below the list
+    # and "the roster did not grow" (live 2026-09-27 and -28). Hires only
+    # move later rows UP, so a row visible at planning stays reachable.
     offers = [(r.row, r) for r in town.recruits
-              if r.hero_class and r.listing == GOLD_RECRUIT_LISTING]
+              if r.hero_class and r.listing == GOLD_RECRUIT_LISTING
+              and r.row < COACH_ROWS_VISIBLE]
+    offers, swaps = _band_room(town, offers)
     have = _roster_classes(town)
     shapes = list(shapes)
     take = min(limit, len(offers))
     if take <= 0:
         return []
 
+    # **Experienced Recruits first** (Fran, 2026-09-26: "priorize this
+    # heroes"). A level-1+ recruit arrives with every skill, skill and gear
+    # rank 2 and four camp skills -- about 6,250 gold of Guild and Blacksmith
+    # work for free -- so they take the room before any level-0 offer, and
+    # the comp-shape search then ranks WITHIN each group.
+    thresholds = _thresholds()
+    seasoned = [o for o in offers if is_experienced(o[1], thresholds)]
+    if seasoned and len(seasoned) < len(offers):
+        first = _pick_hires(seasoned, have, shapes, min(take, len(seasoned)), limit)
+        after = Counter(have)
+        for h in first:
+            after[h.recruit.hero_class] += 1
+        rest = [o for o in offers if o not in seasoned]
+        room = take - len(first)
+        picked = first + (_pick_hires(rest, after, shapes, min(room, len(rest)), room)
+                          if room > 0 and rest else [])
+    else:
+        picked = _pick_hires(offers, have, shapes, take, limit)
+    names = ("fodder", "nurture", "invested")
+
+    def swap_why(h):
+        worst, rv, wv = swaps[h.index]
+        return (f"{h.why}; replaces {worst.label()} "
+                f"({names[rv[0]]} {rv[1]:.1f} over {names[wv[0]]} {wv[1]:.1f})")
+    return [replace(h, replaces=swaps[h.index][0], why=swap_why(h))
+            if h.index in swaps else h for h in picked]
+
+
+def is_experienced(recruit: Recruit, thresholds=None) -> bool:
+    """An Experienced Recruit: arrives above level 0, or with gear bought."""
+    return (recruit_level(recruit, thresholds) >= 1
+            or int(recruit.weapon_rank or 0) + int(recruit.armour_rank or 0) > 0)
+
+
+def _pick_hires(offers, have: Counter, shapes, take: int, limit: int) -> list:
+    if take <= 0:
+        return []
     if shapes and comb(len(offers), take) <= MAX_COMBINATIONS:
         return _best_combination(offers, have, shapes, take)
     return _greedy(offers, have, shapes, limit)
@@ -434,7 +757,9 @@ def _greedy(offers, have: Counter, shapes, limit: int) -> list["Hire"]:
 
 def choose_treatments(town: TownState, game_dir: Path = GAME_DIR,
                       tier: int = 0, budget: int | None = None,
-                      threshold: float = TREAT_ABOVE) -> list[Treatment]:
+                      threshold: float = TREAT_ABOVE,
+                      owned: dict | None = None,
+                      roles: dict | None = None) -> list[Treatment]:
     """Who to put in the Abbey and the Tavern this week.
 
     Ordered by stress DESCENDING: the hero nearest the Resolve Check is the one
@@ -458,18 +783,89 @@ def choose_treatments(town: TownState, game_dir: Path = GAME_DIR,
     treatments = load_stress_treatments(str(game_dir))
     if not treatments:
         return []
-    slots = [(a, i) for a in treatments for i in range(a.slots_at(tier))]
-    slots.sort(key=lambda pair: pair[0].cost_at(tier))
+    # `owned` maps a tree id ("abbey.meditation") to the rank codes bought.
+    # Given it, slots, price and heal each follow their OWN ladder; without
+    # it, the old single `tier` stands for all three.
+    def slots_of(a):
+        if owned is None:
+            return a.slots_at(tier)
+        return a.owned_slots(owned.get(f"{a.building}.{a.activity}", ()))
 
-    gold = budget if budget is not None else int(town.wallet.get("gold", 0))
+    def cost_of(a):
+        if owned is None:
+            return a.cost_at(tier)
+        return a.owned_cost(owned.get(f"{a.building}.{a.activity}", ()))
+
+    def heal_of(a):
+        if owned is None:
+            return a.heal_at(tier)
+        return a.owned_heal(owned.get(f"{a.building}.{a.activity}", ()))
+
+    # Occupied slots come off the unlocked ones, and anyone already sitting in
+    # a slot is being treated, whatever their roster record says yet.
+    act_slots = getattr(town, "activity_slots", None) or {}
+    busy = {g for guids in act_slots.values() for g in guids if g}
+
+    def free_of(a):
+        taken = sum(1 for g in act_slots.get((a.building, a.activity), [])[:slots_of(a)] if g)
+        return max(0, slots_of(a) - taken)
+
+    slots = [(a, i) for a in treatments for i in range(free_of(a))
+             if a.building not in NEVER_BUILDINGS]
+    slots.sort(key=lambda pair: cost_of(pair[0]))
+
+    bank = int(town.wallet.get("gold", 0))
+    gold = budget if budget is not None else bank
+    # The Guild's cap: a tenth of the gold on hand, whatever the budget says.
+    gold = min(gold, int(TREAT_GOLD_FRACTION * bank))
+    # Only a hero WORTH treating, by ROLE (Fran, 2026-09-26): fodder "should
+    # not use the facilities of the Hamlet at all" -- it is dismissed and
+    # replaced from the coach. Invested heroes are kept usable; nurture
+    # heroes are a luxury, ranked by their quirk score. An AFFLICTED hero of
+    # either role is treated whatever the stress, since the town is the only
+    # place an affliction comes off.
+    roles = hero_roles.roles(town) if roles is None else roles
+
+    def role(h):
+        return getattr(roles.get(h.guid), "role", "fodder")
+
+    def afflicted(h):
+        return bool(getattr(h.hero, "affliction_id", None))
+
     candidates = [h for h in town.heroes
                   if not h.building and not h.in_party
-                  and float(getattr(h.hero, "stress", 0.0)) > threshold]
-    candidates.sort(key=lambda h: -float(getattr(h.hero, "stress", 0.0)))
+                  and getattr(h.hero, "guid", None) not in busy
+                  and role(h) in ("invested", "nurture")
+                  and (float(getattr(h.hero, "stress", 0.0)) > threshold
+                       or afflicted(h))]
+    candidates.sort(key=lambda h: (
+        role(h) != "invested", not afflicted(h),
+        -float(getattr(h.hero, "stress", 0.0)) if role(h) == "invested"
+        else -getattr(roles.get(h.guid), "nurture", 0.0)))
+
+    # **Each hero to a slot the game will let them use** (live 2026-09-27: a
+    # Flagellant refused by prayer and by meditation). A class may override
+    # the valid activities outright, and an activity bars some quirks.
+    from data.town_costs import class_valid_activities   # noqa: PLC0415
+
+    def allowed(hero, activity) -> bool:
+        valid = class_valid_activities(str(game_dir), hero.hero_class)
+        if valid is not None and activity.activity not in valid:
+            return False
+        quirks = set(getattr(hero.hero, "quirks", None) or ())
+        return not quirks & set(getattr(activity, "barred_quirks", ()) or ())
+
+    pairs = []
+    free_slots = list(slots)
+    for hero in candidates:
+        pick = next((sl for sl in free_slots if allowed(hero, sl[0])), None)
+        if pick is not None:
+            free_slots.remove(pick)
+            pairs.append((hero, pick))
 
     out: list[Treatment] = []
-    for hero, (activity, _slot) in zip(candidates, slots):
-        cost = activity.cost_at(tier)
+    for hero, (activity, _slot) in pairs:
+        cost = cost_of(activity)
         if cost > gold:
             break
         gold -= cost
@@ -478,13 +874,281 @@ def choose_treatments(town: TownState, game_dir: Path = GAME_DIR,
             hero_class=getattr(hero.hero, "hero_class", ""),
             building=activity.building, activity=activity.activity,
             cost=cost, stress_before=float(getattr(hero.hero, "stress", 0.0)),
-            heals=activity.heal_at(tier)))
+            heals=heal_of(activity),
+            guid=int(getattr(hero.hero, "guid", 0) or 0),
+            slots=slots_of(activity)))
     return out
 
 
+# -- the Sanitarium (Fran, 2026-10-12: docs/NEXT.md item 5, option 4) -------
+
+#: On by default: Fran's ruling. False is the pre-2026-10-12 town, for an A/B.
+SANITARIUM = True
+#: A negative quirk is removed only when it ranks this bad or worse in
+#: `data.quirk_tiers.NEGATIVE_PRIORITY` (1 = the worst of the worst).
+SANITARIUM_NEGATIVE_MAX_PRIORITY = 5
+#: The positive tier worth locking.
+SANITARIUM_LOCK_TIERS = ("S",)
+
+
+@dataclass(frozen=True)
+class SanitariumVisit:
+    """One hero into one Sanitarium slot for the week."""
+    guid: int
+    hero_class: str
+    activity: str        # "disease_treatment" or "treatment"
+    action: str          # "cure", "remove" or "lock"
+    quirk: str
+    cost: int
+    #: The disease slot's chance of curing EVERY disease, not only `quirk`.
+    cure_all_chance: float = 0.0
+
+    def label(self) -> str:
+        extra = f", {self.cure_all_chance:.0%} all" if self.action == "cure" else ""
+        return (f"{self.hero_class}#{self.guid} {self.action} {self.quirk} "
+                f"{self.cost:,}g{extra}")
+
+
+@lru_cache(maxsize=2)
+def quirk_kinds(game_dir: str = str(GAME_DIR)) -> dict:
+    """`{quirk id: "positive" | "negative" | "disease"}`, from the base and
+    DLC quirk libraries (never `modes/`)."""
+    import json                                           # noqa: PLC0415
+    g = Path(game_dir)
+    files = [g / "shared" / "quirk" / "quirk_library.json"]
+    files += sorted(f for f in (g / "dlc").rglob("*quirk_library.json") if "modes" not in f.parts)
+    out = {}
+    for f in files:
+        try:
+            for q in json.loads(f.read_text(encoding="utf-8", errors="replace"))["quirks"]:
+                out[q["id"]] = ("disease" if q.get("is_disease")
+                                else "positive" if q.get("is_positive") else "negative")
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    return out
+
+
+def choose_sanitarium(town: TownState, game_dir: Path = GAME_DIR,
+                      budget: int | None = None, cap: int | None = None,
+                      owned: dict | None = None, roles: dict | None = None,
+                      exclude=()) -> list[SanitariumVisit]:
+    """Who goes to the Sanitarium this week, and for what -- Fran's option 4.
+
+    Diseases first, in the disease slots: the price cures the one chosen and
+    rolls the shipped chance of curing them all. Then the quirk slots: the
+    worst negative ranked 1-5 removed, else an S-tier positive locked. The
+    same exclusions as the Abbey -- invested and nurture heroes only, never
+    one in a building or marked for the party -- and the Abbey's tenth of
+    the bank (`cap`). Shut until the building opens (4 quests).
+    """
+    from data.quirk_tiers import NEGATIVE_PRIORITY, POSITIVE_TIERS   # noqa: PLC0415
+    from data.town_costs import load_sanitarium                     # noqa: PLC0415
+    if not SANITARIUM:
+        return []
+    san = load_sanitarium(str(game_dir))
+    if san is None:
+        return []
+    done = getattr(town, "quests_finished", None)
+    if done is not None and done < san.quests_required:
+        return []
+    bank = int(town.wallet.get("gold", 0))
+    gold = budget if budget is not None else bank
+    gold = min(gold, cap if cap is not None else int(TREAT_GOLD_FRACTION * bank))
+    kinds = quirk_kinds(str(game_dir))
+    rank = {q: p for p, ids in NEGATIVE_PRIORITY.items() for q in ids}
+    lockable = {q for t in SANITARIUM_LOCK_TIERS for q in POSITIVE_TIERS.get(t, ())}
+    locked_by = getattr(town, "locked_quirks", None) or {}
+    roles = hero_roles.roles(town) if roles is None else roles
+    skip = set(exclude)
+
+    def role(h):
+        return getattr(roles.get(h.guid), "role", "fodder")
+
+    act_slots = getattr(town, "activity_slots", None) or {}
+    busy = {g for guids in act_slots.values() for g in guids if g}
+
+    def free(activity, ladder):
+        n = int(ladder.at(owned))
+        taken = sum(1 for g in act_slots.get(("sanitarium", activity), [])[:n] if g)
+        return max(0, n - taken)
+
+    heroes = [h for h in town.heroes
+              if not h.building and not h.in_party and h.guid not in busy
+              and h.guid not in skip and role(h) in ("invested", "nurture")]
+    heroes.sort(key=lambda h: (role(h) != "invested",
+                               -getattr(roles.get(h.guid), "nurture", 0.0)))
+    out: list[SanitariumVisit] = []
+    taken: set = set()
+
+    def take(h, activity, action, quirk, cost, chance=0.0):
+        nonlocal gold
+        if cost > gold:
+            return False
+        gold -= cost
+        taken.add(h.guid)
+        out.append(SanitariumVisit(guid=h.guid, hero_class=h.hero_class, activity=activity,
+                                   action=action, quirk=quirk, cost=int(cost),
+                                   cure_all_chance=float(chance)))
+        return True
+
+    slots = free("disease_treatment", san.disease_slots)
+    for h in heroes:
+        if slots <= 0:
+            break
+        diseases = [q for q in (getattr(h.hero, "quirks", None) or ()) if kinds.get(q) == "disease"]
+        if diseases and take(h, "disease_treatment", "cure", diseases[0],
+                             san.cure_disease.at(owned), san.cure_all_chance.at(owned)):
+            slots -= 1
+    slots = free("treatment", san.quirk_slots)
+    for h in heroes:
+        if slots <= 0:
+            break
+        if h.guid in taken:
+            continue
+        quirks = list(getattr(h.hero, "quirks", None) or ())
+        locked = set(locked_by.get(h.guid, ()))
+        bad = sorted((rank[q], q) for q in quirks
+                     if kinds.get(q) == "negative"
+                     and rank.get(q, 99) <= SANITARIUM_NEGATIVE_MAX_PRIORITY)
+        if bad:
+            q = bad[0][1]
+            price = (san.remove_locked_negative if q in locked else san.remove_negative).at(owned)
+            if take(h, "treatment", "remove", q, price):
+                slots -= 1
+            continue
+        good = [q for q in quirks if q in lockable and q not in locked]
+        if good and take(h, "treatment", "lock", good[0], san.lock_positive.at(owned)):
+            slots -= 1
+    return out
+
+
+#: The Crimson Court's Granary, from `districts_districts.json`.
+GRANARY_COST = {"gold": 2500, "bust": 60, "blueprint": 1}
+
+
+def granary_reserve(town: TownState) -> dict:
+    """What the Granary costs, while a blueprint is held and it is not built."""
+    built = (getattr(town, "districts", None) or {}).get("granary")
+    blueprints = int((town.wallet or {}).get("blueprint", 0) or 0)
+    if built is None or built or blueprints < 1:
+        return {}
+    return {k: v for k, v in GRANARY_COST.items() if k != "blueprint"}
+
+
+#: Fran, 2026-09-27: nurture heroes are levelled "without passing the cap to
+#: have a safe money spend" -- the same tenth of the gold on hand the Guild
+#: and the Abbey keep to.
+NURTURE_GOLD_FRACTION = 0.10
+
+
+@dataclass(frozen=True)
+class NurtureBuy:
+    """One rank for the hero being nurtured, and the building that sells it."""
+    guid: int
+    hero_class: str
+    tree: str            # "weapon", "armour" or a skill id
+    index: int           # the rank code bought (0 = a skill's unlock)
+    gold: int
+    building: str        # "blacksmith" or "guild"
+
+    def label(self) -> str:
+        gear = self.building == "blacksmith"
+        what = ("unlock" if not gear and self.index == 0
+                else f"level {self.index + (2 if gear else 1)}")
+        return f"{self.hero_class}#{self.guid} {self.tree} {what} ({self.gold}g)"
+
+
+def _owned_ranks(profile, hero, game_dir) -> dict:
+    """`{tree: ranks bought}` for one hero, from the upgrades save."""
+    try:
+        from data.hero_skills import gear_ranks, unlocked  # noqa: PLC0415
+        out = dict(unlocked(profile, hero, str(game_dir)))
+        out.update(gear_ranks(profile, hero, str(game_dir)))
+        return out
+    except Exception:                                      # noqa: BLE001
+        return {}
+
+
+def nurture_buys(hero, owned: dict, purchased: set, game_dir: Path = GAME_DIR,
+                 budget: Optional[int] = None, closed: frozenset = frozenset()) -> list:
+    """Every rank this hero can buy NOW, cheapest first, within `budget`.
+
+    "Now" is the shipped tree's own gate: the previous rank, the building
+    rank (`guild.skill_levels`, `blacksmith.weapon`...) in `purchased`, and
+    `prerequisite_resolve_level` against the hero's resolve. The skills the
+    hero WEARS and the gear come before the other skills. Buying one rank can
+    open the next, so this walks until nothing is left or the gold is."""
+    from data.town_costs import load_hero_ranks            # noqa: PLC0415
+    lh = getattr(hero, "hero", hero)
+    ranks = load_hero_ranks(str(game_dir), lh.hero_class)
+    if not ranks:
+        return []
+    level = int(getattr(lh, "resolve_level", 0) or 0)
+    worn = set(getattr(lh, "selected_skills", None) or ())
+    have = {t: int(owned.get(t, 0) or 0) for t in ranks}
+    shut = {t for t in ranks
+            if ("blacksmith" if t in ("weapon", "armour") else "guild") in closed}
+    left = budget
+    out = []
+    while True:
+        options = []
+        for tree, ladder in ranks.items():
+            i = have[tree]
+            if i >= len(ladder) or tree in shut:
+                continue
+            r = ladder[i]
+            if r.resolve > level or not all(n in purchased for n in r.needs):
+                continue
+            if left is not None and r.gold > left:
+                continue
+            gear = tree in ("weapon", "armour")
+            options.append((not (gear or tree in worn), r.gold, tree, r))
+        if not options:
+            return out
+        _worn, gold, tree, r = min(options)
+        out.append(NurtureBuy(guid=int(lh.guid), hero_class=lh.hero_class,
+                              tree=tree, index=r.index, gold=r.gold,
+                              building="blacksmith" if tree in ("weapon", "armour")
+                              else "guild"))
+        have[tree] += 1
+        if left is not None:
+            left -= gold
+
+
+def plan_nurture(town: TownState, profile, purchased: set,
+                 game_dir: Path = GAME_DIR, budget: Optional[int] = None,
+                 roles: Optional[dict] = None, closed: frozenset = frozenset()) -> list:
+    """ONE nurture hero's buys this visit (Fran, 2026-09-27: *"max out what
+    you can do in a hero before start nurturing another"*).
+
+    The candidates are heroes whose quirks make them worth nurturing
+    (`hero_roles.NURTURE_MIN`), whatever their role now -- gold sunk into a
+    nurture hero makes them "invested", and that must not hand the Hamlet's
+    attention to the next one. The one already carrying the most gold goes
+    first, so a hero is finished before another is started; a hero with
+    nothing to buy at their level is passed over until a level-up re-opens
+    them."""
+    roles = hero_roles.roles(town, profile) if roles is None else roles
+    bank = int((town.wallet or {}).get("gold", 0))
+    cap = int(NURTURE_GOLD_FRACTION * bank)
+    budget = cap if budget is None else min(budget, cap)
+    pool = [h for h in town.heroes or ()
+            if getattr(roles.get(h.guid), "nurture", 0.0) >= hero_roles.NURTURE_MIN
+            and not h.building]
+    pool.sort(key=lambda h: (-getattr(roles.get(h.guid), "sunk", 0),
+                             -getattr(roles.get(h.guid), "nurture", 0.0)))
+    for h in pool:
+        buys = nurture_buys(h, _owned_ranks(profile, h.hero, game_dir),
+                            purchased, game_dir, budget, closed)
+        if buys:
+            return buys
+    return []
+
+
 def choose_upgrades(wallet: dict, purchased: set, game_dir: Path = GAME_DIR,
-                    priority=UPGRADE_PRIORITY,
-                    max_ranks: int = MAX_RANKS_PER_VISIT):
+                    priority=None,
+                    max_ranks: int = MAX_RANKS_PER_VISIT,
+                    closed: frozenset = frozenset()):
     """Walk `priority` and buy what the wallet reaches, trading when short.
 
     Returns `([Purchase], wallet_after)`.
@@ -494,17 +1158,25 @@ def choose_upgrades(wallet: dict, purchased: set, game_dir: Path = GAME_DIR,
     also why this cannot be a set-difference against `next_nodes`: that answers
     "what is open now", and buying `a` opens `b` within the same visit.
     """
+    if priority is None:                   # read now, so an experiment can reorder it
+        priority = UPGRADE_PRIORITY
     nodes_by_building = {}
     chosen: list[UpgradeNode] = []
     owned = set(purchased)
 
     for building, tree_id in priority:
+        if building in closed:             # not open yet: nothing to buy there
+            continue
         if building not in nodes_by_building:
             nodes_by_building[building] = load_building_upgrades(str(game_dir),
                                                                  building)
         all_nodes = nodes_by_building[building]
         taken = 0
-        while taken < max_ranks:
+        cap = max_ranks
+        if SERVICE_DISCOUNT_MAX_RANKS is not None and tree_id in SERVICE_DISCOUNT_TREES:
+            cap = min(cap, SERVICE_DISCOUNT_MAX_RANKS
+                      - sum(1 for k in owned if k[0] == tree_id))
+        while taken < cap:
             openable = [n for n in next_nodes(all_nodes, owned)
                         if n.tree_id == tree_id]
             if not openable:
@@ -515,7 +1187,33 @@ def choose_upgrades(wallet: dict, purchased: set, game_dir: Path = GAME_DIR,
             taken += 1
 
     rates = load_rates(str(game_dir))
-    bought, left = plan_purchases(wallet, chosen, rates)
+    if exchange_is_modded(game_dir):
+        # **A modded exchange has rows nobody measured**, so no trade is
+        # planned and only what the wallet covers outright is bought. Fran,
+        # 2026-09-23: *"the model is trying to change heirlooms to unlock
+        # something it isn't able to"* -- Garphyield's Exchange adds
+        # heirloom -> gold rows, `exchange_to_row` (vanilla order) aims at
+        # the wrong row, the name check refuses the confirm, and the whole
+        # step spins for nothing every visit.
+        rates = ()
+    # **What the wallet cannot reach may be the prerequisite of what it can.**
+    # `chosen` treats every openable rank as bought, so a rank behind an
+    # unaffordable one looked open -- live 2026-09-27, twice: Experienced
+    # Recruits b (heirlooms only) planned while its guild.skill_levels c and
+    # blacksmith c (gold) were dropped, and the game refused it. Re-plan
+    # without any rank whose prerequisites the kept set does not cover.
+    while True:
+        bought, left = plan_purchases(wallet, chosen, rates)
+        have = set(purchased)
+        orphan = None
+        for n, _t in bought:
+            if not all(p in have for p in n.prerequisites):
+                orphan = n
+                break
+            have.add(n.key)
+        if orphan is None:
+            break
+        chosen = [n for n in chosen if n.key != orphan.key]
     return [Purchase(node=n, trades=tuple(t)) for n, t in bought], left
 
 
@@ -584,13 +1282,173 @@ def roster_cap(upgrades_file=None, game_dir: Path = GAME_DIR):
     for (tree_hash, _instance), n in counts.items():
         if tree_hash == wanted:
             rank = max(rank, int(n))
-    return tiers[min(rank, len(tiers) - 1)]
+    return tiers[min(rank, len(tiers) - 1)] + workshop_roster_bonus(game_dir)
+
+
+#: Read Steam Workshop mods at all. True for the live player, whose install
+#: is modded (Expanded Roster, a replaced heirloom exchange). The campaign
+#: simulator plays VANILLA + DLC (docs/CAMPAIGN_SIM.md) and sets it False,
+#: or Fran's `Expanded Roster: 1000` makes the simulated cap 1012 and the
+#: roster grows to 70 heroes. The DLC slots live in `GAME_DIR` and are
+#: counted either way.
+INCLUDE_WORKSHOP = True
+
+
+def exchange_is_modded(game_dir: Path = GAME_DIR) -> bool:
+    """Does a Workshop mod replace `heirloom_exchange.json`?"""
+    if not INCLUDE_WORKSHOP:
+        return False
+    try:
+        root = Path(game_dir).parents[1] / "workshop" / "content" / "262060"
+        return any(root.glob("*/campaign/heirloom_exchange/"
+                             "heirloom_exchange.json"))
+    except (OSError, IndexError):
+        return False
+
+def workshop_roster_bonus(game_dir: Path = GAME_DIR) -> int:
+    """Extra roster slots the WORKSHOP mods add, which the game dir cannot see.
+
+    **A cap read from the game files alone is wrong on a modded install, and
+    a wrong cap does not merely misreport -- it starves the roster.** Fran,
+    2026-09-22: *"there is no cap here, i enhanced the cap with a mod, the cap
+    should be checked by the ingame info"*. Measured: `roster_cap` returned 9
+    against 11 heroes, so `choose_recruits` correctly found "room for 0" and
+    hired nobody for the whole campaign, while twelve recruits -- a Plague
+    Doctor, a Crusader, a Highwayman among them -- sat in the coach and the
+    fieldable roster stayed stressed and shrinking.
+
+    DD composes the cap as the upgrade tier PLUS every mod's
+    `*.roster.additional_variables.json`. `Expanded Roster: 1000` ships
+    `{"additional": {"roster_size": 1000}}`, which is why the game's own
+    counter reads 1017 where this file computed 9.
+
+    **The DLC add slots too** -- Fran, same day: *"dlc files also increase
+    roster slots"*. Shieldbreaker, Duelist and Runaway each ship one, so a
+    normal campaign gains 3 from `GAME_DIR` before any mod is counted.
+
+    Summed rather than maxed, because each source adds its own, and that is
+    how the game reads them. Unreadable sources contribute 0 rather than
+    breaking the cap. Measured on Fran's install: 1000 from the workshop plus
+    3 from the DLC, against a game counter of 1017 -- so the remaining
+    difference is in the vanilla TIER this file computes, and a cap that is a
+    little low is safe where one that is high is not.
+    """
+    import json                                           # noqa: PLC0415
+
+    total = 0
+    roots = []
+    try:
+        game = Path(game_dir)
+        roots.append(game)                                # the DLC live here
+        if INCLUDE_WORKSHOP:
+            roots.append(game.parents[1] / "workshop" / "content" / "262060")
+    except Exception:                                     # noqa: BLE001
+        return 0
+    seen = set()
+    for root in roots:
+        try:
+            if not root.is_dir():
+                continue
+            for path in root.rglob("*.roster.additional_variables.json"):
+                # **`modes/` is a DIFFERENT CAMPAIGN.** Bloodmoon and New Game
+                # Plus ship their own copy of each feature's slot, and counting
+                # those would inflate an ordinary campaign's cap by one per
+                # mode per class.
+                if "modes" in path.parts or path in seen:
+                    continue
+                seen.add(path)
+                try:
+                    data = json.loads(path.read_text(encoding="utf-8",
+                                                     errors="replace"))
+                    total += int(data.get("additional", {})
+                                 .get("roster_size", 0))
+                except Exception:                         # noqa: BLE001
+                    continue
+        except Exception:                                 # noqa: BLE001
+            continue
+    return total
 
 
 # -- the whole visit ------------------------------------------------------
 
+# **PizzaRat's positive-quirk tiers**, keyed by the GAME's quirk id (the site
+# uses its own ids: `corvid_grace` is `corvids_grace`, `man_slayer` is
+# `slayer_of_man`). Fetched 2026-09-23 from
+# https://pizzarat105.github.io/PizzaRatReview/dd_map_test.html -- Fran's
+# ruler for "a quirk worth investing in". S/A/B are GOOD ENOUGH.
+# The tables live in `data/quirk_tiers.py` (one source for dismissal and
+# curio scoring alike): every positive quirk -> its tier letter.
+from data.quirk_tiers import POSITIVE_TIERS as _POSITIVE_TIERS  # noqa: E402
+QUIRK_TIER = {q: tier for tier, ids in _POSITIVE_TIERS.items() for q in ids}
+GOOD_QUIRK_TIERS = ("S", "A", "B")
+
+
+#: Fran, 2026-09-26, on the Abbey: *"lets make the same use as the guild, a
+#: lvl 0 hero is not worth recovering unless extremely good trait or heavy
+#: gold on bank ... otherwise its just a money waste"*. The Guild's rules:
+#: never for level 0, and never more than a tenth of the gold on hand.
+TREAT_GOLD_FRACTION = 0.10
+#: "Heavy gold on bank": at or above this a level-0 hero may be treated too.
+#: A declared convention -- about five treatments' worth at the dearest price.
+HEAVY_GOLD = 30_000
+
+
+def has_excellent_quirk(hero: RosterHero) -> bool:
+    """An S-tier positive quirk: Fran's "extremely good trait"."""
+    return any(QUIRK_TIER.get(q) == "S" for q in (hero.hero.quirks or ()))
+
+
+def has_good_quirk(hero: RosterHero) -> bool:
+    return any(QUIRK_TIER.get(q) in GOOD_QUIRK_TIERS
+               for q in (hero.hero.quirks or ()))
+
+
+def choose_dismissals(town: TownState, need: int, keep=()) -> list[RosterHero]:
+    """Who to let go when the REAL cap is hit, worst first.
+
+    Fran, 2026-09-22: *"a quirkless (good enough quirks) ... and low level
+    hero can be dismissed freely"*, and *"low level depends on the average
+    roster level, but 0 can be always dismissed"*. So a candidate has no
+    S/A/B quirk AND is level 0 or below the roster's mean level; among those
+    the most stressed goes first -- a stressed hero costs gold before they
+    are worth anything. A hero in a building or in `keep` is never offered.
+    """
+    heroes = list(town.heroes or ())
+    if need <= 0 or not heroes:
+        return []
+    mean = sum(h.resolve_level for h in heroes) / len(heroes)
+    keep = set(keep)
+    pool = [h for h in heroes
+            if h.guid not in keep and h.available and not h.in_party
+            and not has_good_quirk(h)
+            and (h.resolve_level == 0 or h.resolve_level < mean)]
+    pool.sort(key=lambda h: (h.resolve_level, -h.stress))
+    return pool[:need]
+
+
+#: Fran's reset rule, 2026-09-23: *"dismissing all heroes on lvl 0 and over
+#: 50 stress"*, to restart a stuck campaign from a clean roster.
+RESET_STRESS = 50.0
+
+
+def reset_dismissals(town: TownState, keep=()) -> list[RosterHero]:
+    """Every level-0 hero over `RESET_STRESS`, most stressed first.
+
+    Not wired into `advise`: this is the rebuild Fran described for a save
+    past the point of no return, and whether to run it is his call. The
+    hero he keeps back for a Darkest Dungeon week is passed in `keep`.
+    `town.dismiss_heroes` executes the list.
+    """
+    keep = set(keep)
+    out = [h for h in (town.heroes or ())
+           if h.guid not in keep and h.resolve_level == 0
+           and h.stress > RESET_STRESS and not h.in_party]
+    return sorted(out, key=lambda h: -h.stress)
+
 def advise(town: TownState, store=None, upgrades_file=None,
-           game_dir: Path = GAME_DIR, roster_room: int = 2) -> TownAdvice:
+           game_dir: Path = GAME_DIR,
+           roster_room: Optional[int] = None,
+           sanitarium_spends: bool = True) -> TownAdvice:
     """One town visit's plan.
 
     `store` is optional and only buys the recruiting half: without it there are
@@ -606,7 +1464,33 @@ def advise(town: TownState, store=None, upgrades_file=None,
     purchased = read_purchased(upgrades_file, all_nodes) if upgrades_file else set()
 
     wallet = dict(town.wallet or {})
-    purchases, left = choose_upgrades(wallet, purchased, game_dir)
+    # **The Granary first, once there is a blueprint** (Fran, 2026-09-27:
+    # extra food and healing for the party). Its price is held back from
+    # every other upgrade until it can be bought.
+    held = granary_reserve(town)
+    if held:
+        held = {cur: min(n, int(wallet.get(cur, 0))) for cur, n in held.items()}
+        for cur, n in held.items():
+            wallet[cur] = int(wallet.get(cur, 0)) - n
+        have = int((town.wallet or {}).get("bust", 0))
+        notes.append(f"saving for the Granary (blueprint held): "
+                     f"{have}/{GRANARY_COST['bust']} bust, "
+                     f"{int((town.wallet or {}).get('gold', 0))}/"
+                     f"{GRANARY_COST['gold']} gold")
+    offers = sum(1 for r in town.recruits or ()
+                 if r.hero_class and r.listing == GOLD_RECRUIT_LISTING)
+    cap = roster_cap(upgrades_file, game_dir)
+    shut = closed(town, game_dir)
+    if shut & {b for b, _t in UPGRADE_PRIORITY}:
+        notes.append("not open yet: " + ", ".join(sorted(shut)))
+    order = priority_for(len(town.heroes or ()), offers, cap)
+    if order != tuple(UPGRADE_PRIORITY):
+        notes.append(f"roster {len(town.heroes or ())} + {offers} offered over a "
+                     f"cap of {cap}: roster size first")
+    purchases, left = choose_upgrades(wallet, purchased, game_dir, priority=order,
+                                      closed=shut)
+    for cur, n in held.items():
+        left[cur] = int(left.get(cur, 0)) + n
     if not purchases and wallet:
         notes.append("no affordable upgrade on the priority path")
 
@@ -627,6 +1511,13 @@ def advise(town: TownState, store=None, upgrades_file=None,
     # harmless and the report was honest; what was wrong is planning a thing
     # the game will refuse, every single visit, while `rostersize` upgrades
     # get bought on the theory that they are what is missing.
+    # **Hire EVERY offer by default.** Fran, 2026-09-23: *"You are recruiting
+    # 2 people rather than all and that limits your options to 2 stressed out
+    # and 2 clean"*. A recruit costs nothing at the coach; the choice of who
+    # to field is made at embark, and it needs the whole pool to choose from.
+    if roster_room is None:
+        roster_room = sum(1 for r in town.recruits or ()
+                          if r.hero_class and r.listing == GOLD_RECRUIT_LISTING)
     cap = roster_cap(upgrades_file, game_dir)
     room = roster_room
     if cap is not None:
@@ -637,20 +1528,71 @@ def advise(town: TownState, store=None, upgrades_file=None,
                          f"of {cap}, so there is room for {room}")
     else:
         notes.append("could not read the roster cap; hiring as if there is room")
+    # **At the real cap, plan who makes room -- but do not hire into it yet.**
+    # Dismissal is not actuated, so counting the freed slots as room would
+    # re-create the "plan a hire the game will refuse" loop above.
+    dismissals = tuple(cap_dismissals(town))
+    if dismissals:
+        notes.append(f"{len(dismissals)} fodder hero(es) over the per-class "
+                     f"band caps {band_caps(town)}: " + ", ".join(
+                         h.label() for h in dismissals[:6])
+                     + (" ..." if len(dismissals) > 6 else ""))
+    if cap is not None and room < roster_room:
+        extra = [h for h in choose_dismissals(town, roster_room - room)
+                 if h not in dismissals]
+        dismissals = dismissals + tuple(extra)
+        if dismissals:
+            notes.append("at the cap: would dismiss " + ", ".join(
+                h.label() for h in dismissals))
     hires = choose_recruits(town, shapes, limit=room) if room else ()
+    # A hire into a FULL class band replaces that band's worst fodder, and the
+    # dismissal is planned with it (`_band_room`).
+    swapped = tuple(h.replaces for h in hires
+                    if h.replaces is not None and h.replaces not in dismissals)
+    if swapped:
+        notes.append("better recruits replace: " + ", ".join(
+            h.label() for h in swapped))
+        dismissals = dismissals + swapped
     # Stress last, and out of what the other two LEAVE. A treated hero is
     # worth having and a hire is worth more: the roster is what makes a comp
     # fieldable at all, and an untreated hero is still playable while a missing
     # class is not. Spending the remainder is also the safe direction -- it can
     # only ever plan fewer treatments than the wallet could afford, never more.
-    treatments = choose_treatments(
-        town, game_dir, budget=int(left.get("gold", 0)))
+    owned: dict = {}
+    for tree_id, code in purchased:
+        owned.setdefault(tree_id, set()).add(code)
+    treatments = [] if "abbey" in shut else choose_treatments(
+        town, game_dir, budget=int(left.get("gold", 0)), owned=owned)
     for t in treatments:
         left["gold"] = int(left.get("gold", 0)) - t.cost
+    # The Sanitarium under the SAME tenth of the bank the Abbey keeps to,
+    # out of what the Abbey left of it (Fran's option 4, 2026-10-12).
+    bank = int(town.wallet.get("gold", 0))
+    sanitarium = choose_sanitarium(
+        town, game_dir, budget=int(left.get("gold", 0)), owned=owned,
+        cap=max(0, int(TREAT_GOLD_FRACTION * bank) - sum(t.cost for t in treatments)),
+        exclude={t.guid for t in treatments})
+    # The simulator applies the plan, so it pays for it. The live town only
+    # reports it (the panel is not measured) and passes False: gold held for
+    # a treatment nobody clicks would starve the nurture spend below.
+    if sanitarium_spends:
+        for v in sanitarium:
+            left["gold"] = int(left.get("gold", 0)) - v.cost
 
-    return TownAdvice(purchases=tuple(purchases), hires=tuple(hires),
+    # Nurture last, out of what the rest left, under its own tenth of the bank.
+    nurture: list = []
+    if upgrades_file is not None:
+        owned_now = set(purchased) | {p.node.key for p in purchases}
+        nurture = plan_nurture(town, Path(upgrades_file).parent, owned_now,
+                               game_dir, budget=int(left.get("gold", 0)), closed=shut)
+        for n in nurture:
+            left["gold"] = int(left.get("gold", 0)) - n.gold
+
+    return TownAdvice(sanitarium=tuple(sanitarium),
+                      purchases=tuple(purchases), hires=tuple(hires),
                       treatments=tuple(treatments),
-                      wallet_after=left, notes=tuple(notes))
+                      wallet_after=left, notes=tuple(notes),
+                      dismissals=dismissals, nurture=tuple(nurture))
 
 
 def _all_shapes(store) -> list[tuple[str, list[str]]]:

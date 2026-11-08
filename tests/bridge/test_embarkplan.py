@@ -30,9 +30,14 @@ pytestmark = pytest.mark.skipif(not GAME_DIR.exists(),
 GD = str(GAME_DIR)
 
 
-def hero(hero_class: str, guid: int, stress: float = 0.0, resolve: int = 0):
+# INVESTED by default (resolve 1, rank-1 gear: an Experienced Recruit): since
+# 2026-09-26 FODDER is never bought skills (Fran), so the unlock-costing tests
+# need heroes who can be.
+def hero(hero_class: str, guid: int, stress: float = 0.0, resolve: int = 1,
+         weapon: int = 1):
     return RosterHero(hero=LiveHero(guid=guid, hero_class=hero_class,
-                                    stress=stress, resolve_level=resolve))
+                                    stress=stress, resolve_level=resolve,
+                                    weapon_rank=weapon))
 
 
 # The live campaign's twelve, which is what makes the fieldable set realistic.
@@ -189,13 +194,25 @@ def test_provisions_are_reserved_before_any_skill_is_bought(store, tmp_path, fre
     property of the party. What is actually BOUGHT is that basket net of the
     grant, which is never larger -- so reserving the un-discounted amount can
     only leave the skill budget bigger than promised, never smaller."""
+    # **The reservation is about the SKILL BUDGET, so it is asserted on the
+    # decision, not on the final basket.** Since 2026-09-21 `plan_embark`
+    # spends the remainder on torches and food AFTER the unlocks are chosen,
+    # so `basket_cost` can exceed the reservation while the budget it
+    # protected is untouched -- which is the property this test exists for.
+    decided = EP._decide_embark(town(), store, tmp_path, random.Random(0), GD)
     plan = EP.plan_embark(town(), store, tmp_path, random.Random(0), GD)
     reserved = P.cost(P.basket("crypts", 1, "recommended"))
     assert reserved == 3550
-    assert plan.basket_cost <= reserved
+    assert decided.basket_cost <= reserved
     party = [s.hero.hero_class for s in plan.party]
-    assert plan.basket_cost == P.cost(
-        P.basket("crypts", 1, "recommended", party=party))
+    # Since PLAYBOOK 7.7 the derived needs replace the guide item by item.
+    from bridge.provision_needs import derived_basket
+    assert decided.basket_cost == P.cost(
+        P.basket("crypts", 1, "recommended", party=party,
+                 derived=derived_basket("crypts", "short", "explore", str(GD))))
+    # The top-up changed nothing the budget depended on.
+    assert plan.unlocks_cost == decided.unlocks_cost
+    assert plan.gold_after >= 0
     assert plan.gold_after == plan.gold - plan.basket_cost - plan.unlocks_cost
 
 
@@ -207,11 +224,27 @@ def test_the_party_is_not_sold_what_the_game_gives_it(store, tmp_path, free):
     plan = EP.plan_embark(town(), store, tmp_path, random.Random(0), GD)
     party = [s.hero.hero_class for s in plan.party]
     free_items = P.granted(party, plan.quest.length, GD)
+    # **The guide is a FLOOR, not an equality, since 2026-09-21.** Leftover
+    # gold is spent on torches and food after the unlocks are chosen
+    # (`_spend_the_remainder`), so the basket can exceed the guide -- but
+    # never fall below it, and never in anything except those two. The
+    # ordering this test is about is unchanged: the reservation still happens
+    # before any skill is bought, and the top-up runs on what nothing else
+    # claimed.
     for item, n in free_items.items():
         if item in ("firewood", "dog_treats"):
             continue          # not sold, so never in a basket either way
-        want = (P.GUIDE["crypts"]["short"].get(item) or (0, 0))[1]
-        assert plan.basket.get(item, 0) == max(0, want - n), item
+        # Derived from the game where it can be (PLAYBOOK 7.7), else the guide.
+        from bridge.provision_needs import derived_basket
+        derived = derived_basket("crypts", "short", "explore", str(GD))
+        want = derived.get(item,
+                           (P.GUIDE["crypts"]["short"].get(item) or (0, 0))[1])
+        floor = max(0, want - n)
+        got = plan.basket.get(item, 0)
+        assert got >= floor, item
+        if got > floor:
+            assert item in P.TOP_UP_ORDER, (
+                f"{item} exceeded the guide and is not a top-up item")
     if any(k not in ("firewood",) for k in free_items):
         assert any("not bought" in note for note in plan.notes)
 
@@ -277,11 +310,32 @@ def test_a_hero_past_the_resolve_check_is_benched():
             hero("jester", 5, 100.0), hero("jester", 6, 99.0),
             hero("leper", 7, 0.0), hero("leper", 8, 0.0)]
     kept, benched = EP._rested(pool)
-    assert sorted(h.guid for h in benched) == [1, 3, 5]
-    assert sorted(h.guid for h in kept) == [2, 4, 6, 7, 8]
-    # 99 stays and 100 goes: the cut is the Resolve Check itself, not a margin
-    # somebody chose.
+    # **Four rested heroes exist, so the STRAINED line applies** and the
+    # jester at 99 sits the week out with the afflicted ones.
+    assert sorted(h.guid for h in benched) == [1, 3, 5, 6]
+    assert sorted(h.guid for h in kept) == [2, 4, 7, 8]
     assert EP.RESOLVE_CHECK == 100.0
+    assert EP.STRAINED == 50.0
+
+
+def test_the_STRAINED_line_gives_way_rather_than_refuse_the_week():
+    """Never starves. With fewer than four heroes under 50 the gate falls
+    back to the affliction line -- a party of three is worse than a party of
+    four with a tired hero in it, and a campaign that cannot field anybody is
+    one the Hamlet has to fix rather than one this should refuse."""
+    pool = [hero("crusader", 1, 60.0), hero("vestal", 2, 70.0),
+            hero("jester", 3, 80.0), hero("leper", 4, 0.0),
+            hero("leper", 5, 120.0)]
+    kept, benched = EP._rested(pool)
+    assert sorted(h.guid for h in kept) == [1, 2, 3, 4], "it starved the week"
+    assert sorted(h.guid for h in benched) == [5]
+
+
+def test_it_sends_EVERYBODY_when_even_that_is_not_enough():
+    pool = [hero("crusader", 1, 150.0), hero("vestal", 2, 170.0),
+            hero("jester", 3, 180.0), hero("leper", 4, 190.0)]
+    kept, benched = EP._rested(pool)
+    assert len(kept) == 4 and benched == []
 
 
 def test_it_would_rather_send_a_tired_hero_than_a_party_of_three():
@@ -481,3 +535,292 @@ def test_the_derivation_AGREES_with_the_search_on_every_class(store):
         mine = frozenset(r for r in range(1, PARTY_SIZE + 1)
                          if EP.launchable_from(store, hero_id, r) >= want)
         assert (mine or frozenset(range(1, PARTY_SIZE + 1))) ==             space.viable_ranks(hero_id), hero_id
+
+# -- the top-up has a floor -------------------------------------------------
+
+def test_the_top_up_leaves_a_RESERVE(store, tmp_path, free):
+    """**"Max if possible" is not "all of it".** Measured live 2026-09-22:
+    the top-up took the wallet 5,070 -> 20, which is 99.6% of the estate's
+    gold into one expedition's food and torches. The next week could then buy
+    no skill unlock (1,000), no treatment (1,000-1,250) and no recruit -- and
+    a retreat, which the survival layer calls for often at Resolve 0, threw
+    the lot away.
+    """
+    import bridge.embarkplan as EP
+
+    assert EP.TOP_UP_RESERVE >= 2000, (
+        "the floor has to cover a skill unlock plus a treatment")
+    plan = EP.plan_embark(town(), store, tmp_path, random.Random(0), GD)
+    assert plan.gold_after >= 0
+    # The reserve is only claimed when there IS a surplus; it never cuts the
+    # guide basket, so a party cannot go out under-provisioned because of it.
+    decided = EP._decide_embark(town(), store, tmp_path, random.Random(0), GD)
+    assert plan.basket_cost >= decided.basket_cost
+
+
+def test_a_poor_estate_tops_up_NOTHING_rather_than_going_negative(
+        store, tmp_path, free):
+    """With less than the reserve spare there is no surplus to spend, and the
+    basket is the guide's -- untouched."""
+    import bridge.embarkplan as EP
+    from dataclasses import replace as _replace
+
+    decided = EP._decide_embark(town(), store, tmp_path, random.Random(0), GD)
+    poor = decided.basket_cost + decided.unlocks_cost + 10
+    out = EP._spend_the_remainder(decided, decided.quest, poor, str(GD))
+    assert out.basket == decided.basket, "it spent into the reserve"
+
+
+
+# -- the embark veto (2026-09-25) ------------------------------------------
+#
+# The flip stays; a draw the survival layer would abandon at the entrance is
+# re-drawn. Live that night a drawn party read 0% / 3.2 deaths at full HP in
+# the entrance room, retreated after one fight, and lost 4,550g of provisions.
+
+
+def test_no_veto_leaves_the_flip_exactly_as_it_was(store, tmp_path, free):
+    a = EP.plan_embark(town(), store, tmp_path, random.Random(7), GD).comp
+    b = EP.plan_embark(town(), store, tmp_path, random.Random(7), GD,
+                       veto=None).comp
+    assert a == b
+
+
+def test_a_vetoed_draw_is_redrawn(store, tmp_path, free):
+    first = EP.plan_embark(town(), store, tmp_path, random.Random(7), GD).comp
+    asked = []
+
+    def veto(quest, seats):
+        asked.append(len(seats))
+        return "3.2 expected deaths" if len(asked) == 1 else ""
+
+    plan = EP.plan_embark(town(), store, tmp_path, random.Random(7), GD,
+                          veto=veto)
+    assert len(asked) == 2
+    assert plan.comp != first
+    assert any(n.startswith(f"VETO {first}") for n in plan.notes)
+
+
+def test_when_every_draw_is_vetoed_the_first_one_stands(store, tmp_path, free):
+    first = EP.plan_embark(town(), store, tmp_path, random.Random(7), GD).comp
+    plan = EP.plan_embark(town(), store, tmp_path, random.Random(7), GD,
+                          veto=lambda q, s: "hopeless")
+    assert plan.comp == first
+    assert any("every re-draw was vetoed" in n for n in plan.notes)
+
+
+# -- Fran's unlock rules (2026-09-25) --------------------------------------
+#
+# The coin flip drew a new comp every raid and bought 4-5k of skills each
+# time; gold went 17,265 -> 1,185 in one night. Level-0 heroes are never
+# bought skills, unlocks never take more than UNLOCK_GOLD_FRACTION of the gold
+# on hand, and the flip is weighted toward comps needing fewer unlocks.
+
+
+def test_fodder_is_never_bought_skills(store, tmp_path, nothing_unlocked):
+    """Level 1 on XP alone with nothing bought is fodder too (Fran's Mortmain
+    case, 2026-09-26), not only level 0."""
+    green = [hero(h.hero_class, h.guid, h.stress, resolve=h.guid % 2, weapon=0)
+             for h in ROSTER]
+    plan = EP.plan_embark(town(heroes=green, gold=10**6), store, tmp_path,
+                          random.Random(0), GD)
+    assert plan.unlocks_cost == 0
+    assert all(not s.unlocks for s in plan.party)
+
+
+def test_unlocks_never_take_more_than_a_tenth_of_the_gold(store, tmp_path,
+                                                          nothing_unlocked):
+    for gold in (6670, 20000, 60000):
+        plan = EP.plan_embark(town(gold=gold), store, tmp_path,
+                              random.Random(0), GD)
+        assert plan.unlocks_cost <= EP.UNLOCK_GOLD_FRACTION * gold, (gold, plan.unlocks_cost)
+
+
+def test_the_flip_favours_comps_needing_fewer_unlocks(store, tmp_path, monkeypatch):
+    """One comp needs nothing, three need four unlocks each. Unweighted the
+    free one comes up a quarter of the time; weighted 1/(1+n)^2 it is about
+    86%."""
+    party = ROSTER[:EP.PARTY_SIZE]
+
+    def comp(name, n):
+        seats = tuple(EP.Seat(rank=i + 1, hero=h, skills=("a", "b", "c", "d"),
+                              unlocks=("x",) * n if i == 0 else (), cost=0)
+                      for i, h in enumerate(party))
+        return (name, seats, 0)
+
+    fake = [comp("free", 0), comp("dear1", 4), comp("dear2", 4), comp("dear3", 4)]
+    monkeypatch.setattr(EP, "fieldable_comps", lambda *a, **k: list(fake))
+    drawn = [EP.plan_embark(town(gold=10**6), store, tmp_path, random.Random(s), GD).comp
+             for s in range(400)]
+    rate = drawn.count("free") / len(drawn)
+    assert rate > 0.7, rate
+    assert set(drawn) != {"free"}, "a weighted flip is still a flip"
+
+
+def test_the_draw_favours_invested_rested_one_band_parties():
+    inv = [hero(c, i, 0.0) for i, c in enumerate("abcd")]
+    fod = [hero(c, i, 0.0, weapon=0) for i, c in enumerate("abcd")]
+    tired = [hero(c, i, 150.0) for i, c in enumerate("abcd")]
+    mixed = inv[:3] + [hero("e", 9, 0.0, resolve=5)]
+    assert EP.party_weight(inv) > EP.party_weight(fod)
+    assert EP.party_weight(inv) > EP.party_weight(tired)
+    assert EP.party_weight(inv) > EP.party_weight(mixed)
+
+
+def test_the_top_up_fills_open_stacks_and_never_opens_a_slot():
+    """2026-09-27: "+6 food, +9 torch" opened two surplus slots per raid."""
+    got = EP.fill_open_stacks({"food": 12, "torch": 9}, {"food": 18, "torch": 18})
+    assert got == {"food": 12, "torch": 16}
+    got = EP.fill_open_stacks({"food": 8, "torch": 8}, {"food": 24, "torch": 12})
+    assert got == {"food": 12, "torch": 8}
+
+
+# -- climbing the difficulty (2026-10-05) -----------------------------------
+
+VET_RUINS = Quest(key="5", quest_id="generated_5", dungeon="crypts",
+                  quest_type="cleanse", difficulty=3, length=1, gold_reward=5000)
+NECRO_JUNK = Quest(key="6", quest_id="plot_kill_necromancer_1", dungeon="crypts",
+                   quest_type="kill_boss", difficulty=1, length=2, gold_reward=4500,
+                   reward_trinkets=("dark_tambourine",))
+NECRO_GOOD = Quest(key="7", quest_id="plot_kill_necromancer_1", dungeon="crypts",
+                   quest_type="kill_boss", difficulty=1, length=2, gold_reward=4500,
+                   reward_trinkets=("blasphemous_vial",))
+
+
+def _veterans(level=3):
+    return [hero(c, 100 + i, 0.0, level) for i, c in
+            enumerate(("crusader", "highwayman", "plague_doctor", "vestal"))]
+
+
+def test_a_levelled_roster_climbs_to_veteran():
+    """The 2026-09-28 audit: shortest-first kept the campaign at Apprentice for
+    77 weeks. Four rested level-3 heroes are a Veteran party -- and the game
+    would refuse to send them on the Apprentice one anyway."""
+    assert EP.pick_quest(town(quests=(RUINS, VET_RUINS), heroes=_veterans(3))) is VET_RUINS
+
+
+def test_a_green_roster_stays_at_apprentice():
+    assert EP.pick_quest(town(quests=(RUINS, VET_RUINS))) is RUINS
+
+
+def test_one_underlevelled_hero_is_allowed_two_are_not():
+    one = _veterans(3)[:3] + [hero("leper", 200, 0.0, 2)]
+    two = _veterans(3)[:2] + [hero("leper", 200, 0.0, 2), hero("jester", 201, 0.0, 2)]
+    assert EP.pick_quest(town(quests=(RUINS, VET_RUINS), heroes=one)) is VET_RUINS
+    assert EP.pick_quest(town(quests=(RUINS, VET_RUINS), heroes=two)) is RUINS
+
+
+def test_a_boss_only_for_a_trinket_worth_it():
+    """Fran passed on every boss whose very rare sat low on his tier list."""
+    assert EP.pick_quest(town(quests=(RUINS, NECRO_JUNK))) is RUINS
+    assert EP.pick_quest(town(quests=(RUINS, NECRO_GOOD))) is NECRO_GOOD
+
+
+def test_a_boss_is_never_taken_underlevelled():
+    green = [hero(c, 300 + i, 0.0, 0) for i, c in
+             enumerate(("crusader", "highwayman", "plague_doctor", "vestal"))]
+    assert EP.pick_quest(town(quests=(RUINS, NECRO_GOOD), heroes=green)) is RUINS
+
+
+def test_nothing_in_reach_never_falls_back_to_a_boss():
+    """The fallback took the lowest difficulty, and an Apprentice boss is one."""
+    green = [hero(c, 300 + i, 0.0, 0) for i, c in
+             enumerate(("crusader", "highwayman", "plague_doctor", "vestal"))]
+    assert EP.pick_quest(town(quests=(NECRO_GOOD,), heroes=green)) is None
+    assert EP.pick_quest(town(quests=(NECRO_GOOD, LONG_WEALD), heroes=green)) is LONG_WEALD
+
+
+def test_a_boss_party_is_seated_at_the_quest_level(store, tmp_path):
+    """`quest_in_reach` checks the top four; the comp draw used to seat the
+    cheapest, level-0 fodder included."""
+    # Without the fix this seats two of the level-0s on every seed.
+    vets = ("leper", "jester", "occultist", "antiquarian")
+    green = ("crusader", "highwayman", "plague_doctor", "vestal")
+    both = ([hero(c, 400 + i, 0.0, 1) for i, c in enumerate(vets)]
+            + [hero(c, 500 + i, 0.0, 0) for i, c in enumerate(green)])
+    for s in range(6):
+        plan = EP.plan_embark(town(quests=(NECRO_GOOD,), heroes=both), store, tmp_path,
+                              random.Random(s), GD)
+        assert plan.quest is NECRO_GOOD
+        assert all(seat.hero.resolve_level >= 1 for seat in plan.party), plan.report()
+
+def test_a_boss_party_is_the_highest_level_the_quest_allows(store, tmp_path):
+    """Fran, 2026-10-12: an Apprentice boss goes with level-2 heroes when the
+    roster has them, not the level-1s the quest only requires."""
+    twos = ("leper", "jester", "occultist", "antiquarian")
+    ones = ("crusader", "highwayman", "plague_doctor", "vestal")
+    both = ([hero(c, 400 + i, 0.0, 2) for i, c in enumerate(twos)]
+            + [hero(c, 500 + i, 0.0, 1) for i, c in enumerate(ones)])
+    t = town(quests=(NECRO_GOOD,), heroes=both, gold=400000)
+    fieldable = EP.fieldable_comps(t, store, tmp_path, NECRO_GOOD, GD)
+    best = max(sum(st.hero.resolve_level for st in c[1]) for c in fieldable)
+    assert min(sum(st.hero.resolve_level for st in c[1]) for c in fieldable) < best
+    for s in range(6):
+        plan = EP.plan_embark(t, store, tmp_path, random.Random(s), GD)
+        assert plan.quest is NECRO_GOOD
+        assert sum(seat.hero.resolve_level for seat in plan.party) == best, plan.report()
+
+def test_a_veteran_party_is_seated_with_at_most_one_underlevelled(store, tmp_path):
+    """The same mismatch for an ordinary quest: four Veterans put the
+    Veteran quest in reach, and the draw seated the level-0s."""
+    vets = ("crusader", "highwayman", "plague_doctor", "vestal")
+    green = ("leper", "jester", "occultist", "antiquarian")
+    both = ([hero(c, 400 + i, 0.0, 3) for i, c in enumerate(vets)]
+            + [hero(c, 500 + i, 0.0, 0) for i, c in enumerate(green)])
+    for s in range(6):
+        plan = EP.plan_embark(town(quests=(VET_RUINS,), heroes=both), store, tmp_path,
+                              random.Random(s), GD)
+        assert plan.quest is VET_RUINS
+        assert sum(seat.hero.resolve_level < 3 for seat in plan.party) <= 1, plan.report()
+
+def test_with_no_comp_at_level_the_fewest_underlevelled_are_seated(store, tmp_path):
+    """Four Veterans whose classes no curated comp combines without the
+    level-0s (and level-0 copies of the Veterans' own classes, which the
+    cheapest fill prefers): the draw keeps the comps seating the fewest."""
+    vets = ("leper", "jester", "occultist", "antiquarian")
+    green = ("crusader", "highwayman", "plague_doctor", "vestal") + vets
+    both = ([hero(c, 400 + i, 0.0, 3) for i, c in enumerate(vets)]
+            + [hero(c, 500 + i, 0.0, 0) for i, c in enumerate(green)])
+    fieldable = EP.fieldable_comps(town(quests=(VET_RUINS,), heroes=both), store, tmp_path,
+                                   VET_RUINS, GD)
+    fewest = min(sum(st.hero.resolve_level < 3 for st in c[1]) for c in fieldable)
+    assert fewest > EP.MAX_UNDERLEVELED          # the case this is about
+    for s in range(6):
+        # Gold enough for every comp, so the flip (not the cheapest) decides.
+        plan = EP.plan_embark(town(quests=(VET_RUINS,), heroes=both, gold=400000), store,
+                              tmp_path, random.Random(s), GD)
+        assert sum(seat.hero.resolve_level < 3 for seat in plan.party) <= fewest, plan.report()
+
+def test_the_level_gap_knob_bars_a_far_underlevelled_seat():
+    """`UNDERLEVEL_MAX_GAP` (experiment, default None): three Veterans and
+    a level-0 reach a Veteran quest as coded; at a gap of 1 they do not, and
+    three Veterans and a level-2 still do."""
+    far = _veterans(3)[:3] + [hero("leper", 200, 0.0, 0)]
+    near = _veterans(3)[:3] + [hero("leper", 200, 0.0, 2)]
+    assert EP.UNDERLEVEL_MAX_GAP is None
+    assert EP.pick_quest(town(quests=(RUINS, VET_RUINS), heroes=far)) is VET_RUINS
+    saved = EP.UNDERLEVEL_MAX_GAP
+    try:
+        EP.UNDERLEVEL_MAX_GAP = 1
+        assert EP.pick_quest(town(quests=(RUINS, VET_RUINS), heroes=far)) is RUINS
+        assert EP.pick_quest(town(quests=(RUINS, VET_RUINS), heroes=near)) is VET_RUINS
+    finally:
+        EP.UNDERLEVEL_MAX_GAP = saved
+
+def test_the_boss_level_margin_raises_the_bar():
+    """`BOSS_LEVEL_MARGIN` (experiment, default 0): at 1, a level-1 party no
+    longer reaches an Apprentice boss and a level-2 one does."""
+    ones = [hero(c, 600 + i, 0.0, 1) for i, c in
+            enumerate(("crusader", "highwayman", "plague_doctor", "vestal"))]
+    twos = [hero(c, 700 + i, 0.0, 2) for i, c in
+            enumerate(("crusader", "highwayman", "plague_doctor", "vestal"))]
+    assert EP.BOSS_LEVEL_MARGIN == 0
+    assert EP.pick_quest(town(quests=(RUINS, NECRO_GOOD), heroes=ones)) is NECRO_GOOD
+    saved = EP.BOSS_LEVEL_MARGIN
+    try:
+        EP.BOSS_LEVEL_MARGIN = 1
+        assert EP.pick_quest(town(quests=(RUINS, NECRO_GOOD), heroes=ones)) is RUINS
+        assert EP.pick_quest(town(quests=(RUINS, NECRO_GOOD), heroes=twos)) is NECRO_GOOD
+    finally:
+        EP.BOSS_LEVEL_MARGIN = saved
+

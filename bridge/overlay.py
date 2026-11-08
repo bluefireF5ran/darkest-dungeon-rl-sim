@@ -586,6 +586,9 @@ def main() -> int:
     ap.add_argument("--model", default="models/dd_combat_ppo_full_expedition.zip")
     ap.add_argument("--profile", default=None)
     ap.add_argument("--log", default=None, metavar="FILE")
+    ap.add_argument("--no-playbook-heals", action="store_true",
+                    help="do not apply PLAYBOOK 3.2 to the shortlist "
+                         "- let the policy's own heal ranking stand")
     ap.add_argument("--survival", type=int, nargs="?", const=12, default=0)
     ap.add_argument("--combats-total", type=int, default=None)
     ap.add_argument("--interval", type=float, default=1.0)
@@ -635,7 +638,8 @@ def main() -> int:
     advisor = Advisor(model,
                       total_combats=args.combats_total or DEFAULT_TOTAL_COMBATS,
                       combats_total_explicit=args.combats_total is not None,
-                      survival_episodes=args.survival)
+                      survival_episodes=args.survival,
+                      playbook_heals=not args.no_playbook_heals)
     session = Session(advisor, Path(args.log) if args.log else None,
                       on_update=updates.put)
     profile = find_profile(args.profile)

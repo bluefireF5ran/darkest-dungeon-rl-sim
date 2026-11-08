@@ -166,39 +166,6 @@ def test_losing_a_rank_zero_party_is_not_worth_retreating_over():
 
 # --- the stress units, and the bug they hid ---
 
-def test_the_stress_AHEAD_is_a_PARTY_bill_like_the_stress_on_the_way_out():
-    """`retreat_stress_gold` is `20 * len(living) * rate` — a party total. The
-    continue side must be scaled the same way or the two bills are in different
-    units and the subtraction is meaningless.
-
-    `mean_final_stress` is a per-hero mean (`eval_expedition.py`, a mean over
-    the living heroes), so the party's bill is `(final - carried) * n * rate`.
-    """
-    heroes = [_Hero("crusader", 0, 0, stress=75.0) for _ in range(4)]
-    result = _Result(mean_deaths=0.0, mean_final_stress=150.0, completion_rate=1.0)
-    advice = advise_retreat(heroes, result, QuestReward(gold=3000))
-    expected = 75.0 * 4 * gold_per_stress(GAME_DIR, 0)
-    assert advice.expected_stress_gold == pytest.approx(expected)
-
-
-def test_a_stressed_party_used_to_price_the_ROAD_AHEAD_AT_ZERO():
-    """The regression guard for the bug that kept the live bridge pushing on.
-
-    `carried` was `sum(stress)` over the party while `mean_final_stress` is a
-    per-hero MEAN, so `max(0.0, mean - sum)` was 0 for any party carrying real
-    stress — and every fixture in this file defaults to `stress=0.0`, where a
-    sum and a mean coincide, which is why no test ever saw it.
-
-    This asserts the quantity is positive under the OLD arithmetic's premise:
-    mean-final 150 against a party of four at 75 each is a sum of 300, and
-    `150 - 300` clamps to nothing.
-    """
-    heroes = [_Hero("crusader", 0, 0, stress=75.0) for _ in range(4)]
-    result = _Result(mean_deaths=0.0, mean_final_stress=150.0, completion_rate=1.0)
-    advice = advise_retreat(heroes, result, QuestReward(gold=3000))
-    assert sum(h.stress for h in heroes) == 300.0     # what the old code read
-    assert result.mean_final_stress < 300.0           # ...so it clamped to 0
-    assert advice.expected_stress_gold > 0.0
 
 
 def test_current_stress_is_a_per_hero_MEAN():
@@ -218,11 +185,16 @@ def test_the_survival_floor_overrides_the_gold():
     forecasting 3.8 deaths, and the gold arithmetic calling it a net GAIN of
     375 gold because a fresh party is cheap. Fran's rule — never continue when
     the run is more likely than not to cost somebody — has to win here.
+
+    UNSCALED, explicitly: since 2026-09-23 the default scales the floor by
+    investment, and this party of free recruits is exactly who it spares.
+    This test is about the floor's mechanism, not that default.
     """
     fresh = [_Hero("crusader", 0, 0) for _ in range(4)]
     result = _Result(mean_deaths=3.8, mean_final_stress=0.0, completion_rate=1.0,
                      zero_death_rate=0.0)
-    advice = advise_retreat(fresh, result, QuestReward(gold=3000))
+    advice = advise_retreat(fresh, result, QuestReward(gold=3000),
+                            scale_floor_by_investment=False)
     assert advice.retreat
     assert advice.decided_by == "floor"
     # ...and the gold genuinely did favour staying, or this proves nothing.
@@ -264,13 +236,6 @@ def test_the_floor_is_named_only_when_it_CHANGED_the_answer():
     assert advice.decided_by == "gold"
 
 
-def test_dead_heroes_are_left_out_of_the_retreat_bill():
-    """Only the living eat the retreat stress."""
-    heroes = [_Hero("crusader", 2, 2, hp=0.0)] + [_Hero("crusader", 2, 2) for _ in range(3)]
-    result = _Result()
-    advice = advise_retreat(heroes, result, QuestReward())
-    expected = 20.0 * 3 * gold_per_stress(GAME_DIR, 0)
-    assert advice.retreat_stress_gold == pytest.approx(expected)
 
 
 def test_heirlooms_and_trinkets_are_reported_not_priced():
@@ -322,17 +287,30 @@ if __name__ == "__main__":
 
 # --- the floor, scaled by what is actually at risk ---
 
-def test_the_floor_off_by_default_is_byte_identical():
-    """A contested change ships switched off. Every decision this module made
-    before `scale_floor_by_investment` existed must be unchanged."""
+def test_the_floor_is_SCALED_by_default_on_Frans_ruling():
+    """Shipped off in 2026-09-03 as contested; Fran ruled 2026-09-23 that
+    level-0 heroes are expendable and a broke campaign prefers deaths to
+    retreats. So by default a free party is not floored, and the gold decides."""
     fresh = [_Hero("crusader", 0, 0) for _ in range(4)]
     result = _Result(mean_deaths=3.8, mean_final_stress=0.0, completion_rate=1.0,
                      zero_death_rate=0.0)
     default = advise_retreat(fresh, result, QuestReward(gold=3000))
     explicit = advise_retreat(fresh, result, QuestReward(gold=3000),
-                              scale_floor_by_investment=False)
+                              scale_floor_by_investment=True)
     assert default == explicit
-    assert default.retreat and default.decided_by == "floor"
+    assert default.decided_by == "gold"
+
+
+def test_the_loot_still_on_the_map_counts_for_staying():
+    """Leaving forfeits the map's loot as well as the reward (2026-09-23)."""
+    fresh = [_Hero("crusader", 0, 0) for _ in range(4)]
+    result = _Result(mean_deaths=0.5, mean_final_stress=0.0, completion_rate=0.5,
+                     zero_death_rate=0.6)
+    without = advise_retreat(fresh, result, QuestReward(gold=3000))
+    with_loot = advise_retreat(fresh, result, QuestReward(gold=3000),
+                               loot_ahead_gold=1000)
+    assert with_loot.cost_of_continuing == pytest.approx(
+        without.cost_of_continuing - 500)
 
 
 def test_scaled_the_floor_STANDS_ASIDE_for_a_party_nobody_paid_for():
@@ -386,3 +364,60 @@ def test_the_scaled_threshold_is_DERIVED_not_a_new_constant():
     # Worth more than the quest -> protected. Worth less -> the gold decides.
     assert cheap_quest.retreat
     assert rich_quest.decided_by == "gold"
+
+def test_a_FREE_partys_stress_costs_nothing_so_it_pushes_on():
+    """2026-09-23, Fran: "the model has been retreating all the time". A
+    level-0 party (0 gold sunk) at ~60 stress, forecast to end near 150: the
+    flat 22 gold/stress priced staying at ~8,000 against leaving at 4,778, and
+    it retreated from every fight. Their stress is not worth treating, so it
+    costs nothing, and the quest decides."""
+    party = [_Hero("crusader", 0, 0, stress=60.0) for _ in range(4)]
+    result = _Result(mean_deaths=1.0, mean_final_stress=150.0,
+                     completion_rate=0.6, zero_death_rate=0.3)
+    advice = advise_retreat(party, result, QuestReward(gold=3000),
+                            loot_ahead_gold=1000)
+    assert advice.expected_stress_gold == 0.0
+    assert advice.retreat_stress_gold == 0.0
+    assert not advice.retreat
+
+
+def test_stress_is_NOT_billed_in_gold_on_either_side():
+    """Fran, 2026-09-23: only survival matters for stress, and the rollout
+    already carries it in `mean_deaths`. A heavily stressed party heading
+    for more stress pays nothing for it on either bill."""
+    heroes = [_Hero("crusader", 2, 2, stress=150.0) for _ in range(4)]
+    result = _Result(mean_deaths=0.0, mean_final_stress=199.0,
+                     completion_rate=1.0, zero_death_rate=1.0)
+    advice = advise_retreat(heroes, result, QuestReward(gold=3000))
+    assert advice.retreat_stress_gold == 0.0
+    assert advice.expected_stress_gold == 0.0
+
+
+def test_a_death_costs_at_least_the_heros_share_of_the_quest():
+    """Never steer toward losing a hero: a free recruit's death is priced at
+    their share of the reward, and the living alone share it."""
+    heroes = [_Hero("crusader", 0, 0, hp=0.0)] + [_Hero("crusader", 0, 0)
+                                                  for _ in range(3)]
+    result = _Result(mean_deaths=1.0, mean_final_stress=0.0,
+                     completion_rate=1.0, zero_death_rate=0.0)
+    advice = advise_retreat(heroes, result, QuestReward(gold=3000))
+    assert advice.expected_death_gold == pytest.approx(1000.0)
+
+def test_the_reward_is_not_counted_twice_so_a_lone_survivor_leaves():
+    """Live 2026-09-23: down to one Vestal, the bill read "leaving ~3,000,
+    staying ~3,000 -- push on", because leaving was charged the whole reward
+    while staying already credited it at its odds. Leaving costs nothing
+    extra; a lone hero with poor odds leaves, a sound party stays."""
+    lone = [_Hero("vestal", 0, 0, stress=90.0)]
+    grim = _Result(mean_deaths=1.0, mean_final_stress=0.0, completion_rate=0.1,
+                   zero_death_rate=0.0)
+    advice = advise_retreat(lone, grim, QuestReward(gold=3000))
+    assert advice.cost_of_retreating == 0.0
+    assert advice.retreat
+
+    party = [_Hero("crusader", 0, 0) for _ in range(4)]
+    sound = _Result(mean_deaths=1.4, mean_final_stress=0.0, completion_rate=0.6,
+                    zero_death_rate=0.3)
+    assert not advise_retreat(party, sound, QuestReward(gold=3000),
+                              loot_ahead_gold=1300).retreat
+

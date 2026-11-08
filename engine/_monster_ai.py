@@ -88,6 +88,19 @@ class MonsterAIMixin:
             if not sk.levels:
                 continue
             sd = sk.levels[max(sk.levels.keys())]
+            # `.launch` is the rank the monster must STAND IN to use the
+            # skill. It was parsed but never read on the enemy side until
+            # 2026-09-19: a rank-1 Bone Courtier fired `tempting_goblet`
+            # (`.launch 432`) in 106 of 200 draws. 228 of 694 enemy skills
+            # are launch-restricted and 23 of those are stress attacks, so
+            # shuffling a stress caster out of its firing rank -- the whole
+            # point of disruption -- was a no-op, while `engine/action.py`
+            # enforced the same field for heroes all along. A size>1 monster
+            # passes if ANY occupied rank qualifies, mirroring how `.target`
+            # resolves against it in `_execute_enemy_skill` below.
+            if sd.launch and {p - 1 for p in sd.launch}.isdisjoint(
+                    enemy.occupied_positions):
+                continue
             if not self._check_skill_limits(enemy, sk.id, sd):
                 continue
             if not self._check_valid_mode(enemy, sd):
@@ -355,6 +368,17 @@ class MonsterAIMixin:
         return candidates, weights
 
     def _finish_enemy_action(self, enemy: CombatantState, skill_id: str, sd: SkillLevelData, brain):
+        # `.move` applies on EVERY enemy action path -- this hook is the one
+        # place all three branches (self-target, friendly, enemy) meet.
+        # Hit or miss, matching the hero path, where `_apply_movement` sits
+        # outside the `if result.hit` guard: the Necromancer retreats whether
+        # or not the smite lands.
+        #
+        # Called ONCE per action rather than once per target. The hero path
+        # calls it inside its target loop, which would walk an AoE user one
+        # rank per target; that is a separate pre-existing bug, not copied.
+        if sd.move_self:
+            self._apply_movement(enemy, enemy, sd)
         self._track_skill_use(enemy, skill_id, sd)
         if brain and skill_id in brain.skill_cooldowns:
             enemy.skill_cooldowns[skill_id] = brain.skill_cooldowns[skill_id]
@@ -380,10 +404,27 @@ class MonsterAIMixin:
         actions (_resolve_bonus_initiative), which pick a skill outside the
         normal per-action selection loop (often via combat_skill_id_override)
         but need the exact same self/friendly/enemy-targeting execution."""
+        if sd.atk_dmg_max == 0 and sd.atk_dmg_min == 0:
+            # A `.dmg 0 0` skill (stress attacks, marks, curses) deals no
+            # damage -- `resolve_attack` reads a zero band as that. The band
+            # is put back afterwards because it is also what the observation
+            # and the threat forecast show as this monster's attack, and that
+            # meaning predates this fix (2026-10-06).
+            band = (enemy.dmg_min, enemy.dmg_max)
+            enemy.dmg_min = enemy.dmg_max = 0
+            try:
+                self._execute_enemy_skill_with_band(enemy, skill_id, sd, brain)
+            finally:
+                enemy.dmg_min, enemy.dmg_max = band
+            return
+        self._execute_enemy_skill_with_band(enemy, skill_id, sd, brain)
+
+    def _execute_enemy_skill_with_band(self, enemy: CombatantState, skill_id: str,
+                                       sd: SkillLevelData, brain) -> None:
         self._sync_all_conditional_buffs(performer=enemy, skill_id=skill_id)
-        if sd.atk_dmg_min is not None:
+        if sd.atk_dmg_min:
             enemy.dmg_min = max(1, round(sd.atk_dmg_min * self._monster_dmg_mult))
-        if sd.atk_dmg_max is not None:
+        if sd.atk_dmg_max:
             enemy.dmg_max = max(1, round(sd.atk_dmg_max * self._monster_dmg_mult))
 
         is_heal = sd.heal_min is not None and sd.heal_max is not None

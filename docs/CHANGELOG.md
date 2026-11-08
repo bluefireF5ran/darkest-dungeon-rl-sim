@@ -15,11 +15,25 @@ The detailed record of *why* this simulator works the way it does: the real bugs
 unchanged -- newest first -- and the split is a contiguous cut, so
 concatenating the files below in this order reproduces the original.
 
+- [`docs/changelog/2026-10.md`](changelog/2026-10.md) -- October 2026
 - [`docs/changelog/2026-09.md`](changelog/2026-09.md) -- September 2026, 49 entries, 3948 lines
 - [`docs/changelog/2026-08.md`](changelog/2026-08.md) -- August 2026, 192 entries, 12698 lines
 
 ### Every entry, newest first
 
+- 2026-10-05  The dice are known -- RNG prediction, fate look-ahead, progression  <sub>2026-10</sub>
+- 2026-10-04  The open questions, answered from the code  <sub>2026-10</sub>
+- 2026-10-04  The whole game decompiled, and three weeks of mismatched addresses  <sub>2026-10</sub>
+- 2026-09-19  The new world has a noise floor now, and it is band-dependent  <sub>2026-09</sub>
+- 2026-09-19  The first checkpoint at 1836, and `best_model.zip` is the worse one  <sub>2026-09</sub>
+- 2026-09-19  Everything green before the retrain  <sub>2026-09</sub>
+- 2026-09-19  The comp library came from the team-builder, and names are not identity  <sub>2026-09</sub>
+- 2026-09-19  Seven more mechanics the payload could not describe  <sub>2026-09</sub>
+- 2026-09-19  The policy could not see which skill clears a corpse  <sub>2026-09</sub>
+- 2026-09-19  The unread-key audit is code now, because as prose it went stale  <sub>2026-09</sub>
+- 2026-09-19  Monsters never moved: `.move` was parsed for heroes and hardcoded to 0  <sub>2026-09</sub>
+- 2026-09-19  The region heirloom bias is shipped data, and the Cove half is a myth  <sub>2026-09</sub>
+- 2026-09-19  Enemies ignored their own `.launch` ranks, so disruption did nothing  <sub>2026-09</sub>
 - 2026-09-07  The map panel was hiding the curio panel's X  <sub>2026-09</sub>
 - 2026-09-07  Gathering the loot after the quest is won  <sub>2026-09</sub>
 - 2026-09-06  The hunger check has two looks and the answer had no focus  <sub>2026-09</sub>

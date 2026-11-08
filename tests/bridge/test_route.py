@@ -192,6 +192,20 @@ def test_a_party_in_a_corridor_leaves_by_the_cheaper_end():
     assert plan.moves == 2
 
 
+def test_a_party_in_a_corridor_with_nothing_left_to_cover_is_not_sent_out():
+    """With the objective met both ends tie at zero, and naming the first one
+    filled `next_step`, so the loot walk -- which takes over only on an empty
+    step -- never got a corridor. Live 2026-09-25: rooF -> coFG -> rooF, four
+    laps, an iron maiden waiting past coFG."""
+    dungeon = line_map(4)
+    done = {k: dataclasses.replace(a, knowledge=3) for k, a in dungeon.areas.items()}
+    dungeon = dataclasses.replace(dungeon, areas=done)
+    plan = plan_route(dungeon, "coBC",
+                      Quest(quest_type="explore", goals=(GOAL_EXPLORE,)))
+    assert not plan.targets
+    assert plan.next_step is None, plan.walk
+
+
 def test_the_walk_alternates_rooms_and_corridors():
     dungeon = a_map()
     plan = plan_route(dungeon, None, Quest(quest_type="explore", goals=(GOAL_EXPLORE,)))

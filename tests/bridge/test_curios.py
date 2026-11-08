@@ -84,11 +84,17 @@ def test_a_journal_page_is_not_loot():
 
 
 def test_quirk_polarity_comes_from_the_quirk_library():
-    assert result_value("Quirk", Result("positive")) == 1.0
-    assert result_value("Quirk", Result("negative")) == -1.0
-    # bloodthirsty is what pile_of_bones grants, and it is a negative compulsion.
+    """Signs from the library; sizes from PizzaRat's tiers (PLAYBOOK 7.5,
+    2026-09-23): a random roll leans bad, so a random negative outweighs a
+    random positive, and a named quirk is worth its own tier."""
+    pos = result_value("Quirk", Result("positive"))
+    neg = result_value("Quirk", Result("negative"))
+    assert 0.0 < pos < 1.0 and -1.0 < neg < 0.0
+    assert pos + neg < 0.0
+    # bloodthirsty is what pile_of_bones grants, and it is a negative compulsion
+    # -- PizzaRat's second-worst priority.
     assert _quirks()["bloodthirsty"]["is_positive"] is False
-    assert result_value("Quirk", Result("bloodthirsty")) == -1.0
+    assert result_value("Quirk", Result("bloodthirsty")) == -0.9
 
 
 def test_effect_polarity_comes_from_the_real_effect_definitions():

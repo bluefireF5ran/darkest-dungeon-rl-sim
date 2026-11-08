@@ -169,7 +169,8 @@ def test_eating_RESERVES_food_for_the_hunger_checks_it_can_still_face():
     e._deliberate_eat()
     alive = sum(1 for h in e.engine.heroes if h.is_alive())
     remaining = max(0, e._num_combats - e._combat_idx - 1)
-    reserve = int(round(remaining * HUNGER_CHECK_CHANCE * alive))
+    # The env's own rate: the game's map budgets since 2026-09-25.
+    reserve = int(round(remaining * e._hunger_chance() * alive))
     assert e._provision_inventory["food"] >= reserve, (
         f"ate into the reserve: {e._provision_inventory['food']} left, "
         f"{reserve} needed for {remaining} remaining combats")

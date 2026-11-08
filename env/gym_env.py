@@ -1132,6 +1132,78 @@ class DarkestDungeonEnv(gym.Env):
                 v[16] = _clamp01(eff.pull_distance / 4.0)
             if eff.is_kill_effect:
                 v[43] = 1.0
+            # Does this skill CLEAR A CORPSE? Parsed since the beginning
+            # (`EffectDefinition.is_clear_corpses`) and resolved by
+            # `_effects.py`, but never described to the policy -- so the
+            # observation said a blocking corpse is bad (`W_BLOCKING_CORPSE`,
+            # the per-enemy `is_corpse` flag, the rot timer) and gave no way
+            # to know which button removes one.
+            #
+            # Four hero skills carry it, and each read as its OTHER effect:
+            # Leper `focus` as a push, Occultist `daemons_pull` and Runaway
+            # `ransack` as a pull, Plague Doctor `disorienting_blast` as a
+            # stun plus a shuffle. Nothing distinguished them from an
+            # identical skill that leaves the corpse standing, so the link
+            # was learnable only as a `(class, slot)` pair -- the exact
+            # memorisation this payload exists to remove -- and a modded
+            # class with a corpse-clear skill transferred nothing.
+            if eff.is_clear_corpses:
+                v[45] = 1.0
+
+            # -- appended 2026-09-19, the same audit that found v[45] --------
+            #
+            # Each is a mechanic the engine resolves and the payload could not
+            # describe, so two skills differing ONLY in it were identical to
+            # the policy. Ranked by how many skills carry them and added as
+            # COARSE flags rather than magnitudes: the forecast finding says a
+            # coarse new signal pays (+6.2pp) and every refinement of a signal
+            # already present measured null.
+
+            # Does it move the TORCH? Signed, because raising and lowering it
+            # are opposite decisions -- shipped values run +4..+10 and -5/-10.
+            # The torch LEVEL was already a global feature; what no skill
+            # carried was that using it changes the level. 10 hero skills and
+            # 11 monster skills, and `PLAYBOOK.md` 2.3 is entirely about torch.
+            if eff.torch_change:
+                v[46] = max(-1.0, min(1.0, float(eff.torch_change) / 10.0))
+
+            # Does it SUMMON? 71 monster skills, and nothing in the observation
+            # said so -- only the stall clock, which is a different fact. This
+            # is what makes a Necromancer read as a Necromancer through the
+            # enemy capability pool rather than as a weak attacker.
+            if eff.summon_count or eff.summon_monster_ids:
+                v[47] = _clamp01(float(eff.summon_count or 1) / 3.0)
+
+            # Does it BREAK A GUARD? Guarding is v[10] and was describable;
+            # removing one was not. 7 hero skills, 28 monster skills.
+            if eff.is_clear_guarded or eff.is_clear_guarding:
+                v[48] = 1.0
+
+            # Does it CLEAR A CONTROL EFFECT -- mark, stun, or a stress DoT?
+            # v[9] is the DoT cure and covers bleed/blight/burn only, so these
+            # read as doing nothing at all.
+            if eff.clears_mark or eff.clears_stun or eff.clears_stress_dot:
+                v[49] = 1.0
+
+            # Does it STRIP STEALTH? Applying stealth is v[12]; 8 hero skills
+            # remove it and had no way to say so.
+            if eff.is_unstealth:
+                v[50] = 1.0
+
+            # Does it grant a BONUS ACTION? One shipped hero skill, so this is
+            # thin -- included anyway because action economy is the largest
+            # single lever in a fight and because a modded class carrying it
+            # arrives described rather than invisible, which is the whole
+            # argument for a payload over a class one-hot.
+            if eff.grants_bonus_action:
+                v[51] = 1.0
+
+            # Is the DoT IRRESISTIBLE? A bleed that cannot be resisted is
+            # strictly better than one that can, and the two were identical
+            # here. 3 hero skills.
+            if eff.dot_irresistible:
+                v[52] = 1.0
+
             if eff.health_damage_blocks:
                 v[44] = _clamp01(eff.health_damage_blocks / 2.0)
 
@@ -1152,6 +1224,20 @@ class DarkestDungeonEnv(gym.Env):
                                  (eff.damage_high_multiply, "dmg")):
                 if mult:
                     stat(bucket, float(mult), to_self)
+
+            # The THIRD inline-buff mechanism (`_effects.py`), which this
+            # builder never read: `.buff_type`/`.buff_amount` carry the
+            # stat_type DIRECTLY rather than through `buff_ids` or the
+            # specific-field pattern above. 29 effects -- Arbalest's stacking
+            # heal (`hp_heal_received_percent` -> the `healing` bucket) and
+            # Grapeshot / Expose crit vulnerability (`crit_received_chance` ->
+            # `dmg_taken`). Both buckets already existed, so this is a HOLE in
+            # the channel the payload says carries 60.7% of its signal, not a
+            # new feature, and it closes at no width cost.
+            if eff.inline_buff_type:
+                bucket = _stat_bucket(eff.inline_buff_type, "")
+                if bucket is not None:
+                    stat(bucket, float(eff.inline_buff_amount or 0.0), to_self)
 
             # ...and the buff ids, which is where 60.7% of the signal lives.
             for bid in eff.buff_ids:

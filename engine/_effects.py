@@ -625,6 +625,31 @@ class EffectsMixin:
             bd = self.store.buffs.get(buff_id)
             if not bd:
                 continue
+            # **Two buff types that are not stat deltas** (Fire's Edge Runaway,
+            # Run and Hide: "RW Stealth" -> `rw_run_conditional_stealth`
+            # stat_type `stealth`; "RW Run HoT N" -> `rw_run_hot_N` stat_type
+            # `hp_dot_heal`). Neither was read, so in the simulator Run and
+            # Hide was only "move back 2" and the policy never chose it --
+            # Fran, 2026-09-28: "is restoration properly modeled?". Stealth
+            # lasts the effect's duration; the heal ticks like an effect's
+            # heal_dot. The heal's rule (`is_stealthed`) is approximated as
+            # always true: the same skill grants 4 rounds of stealth with 3
+            # of heal.
+            if bd.stat_type == "stealth":
+                eff_target.is_stealthed = True
+                eff_target.stealth_rounds_remaining = (
+                    eff.duration if eff.duration is not None else bd.duration)
+                self.log.append(f"{eff_target.name} is stealthed ({eff.name})")
+                continue
+            if bd.stat_type == "hp_dot_heal":
+                rounds = eff.duration if eff.duration is not None else (bd.duration or 3)
+                eff_target.heal_dots.append(DotInstance(
+                    effect_name=eff.name, damage_per_tick=bd.amount,
+                    remaining_ticks=rounds, chance=1.0,
+                ))
+                self.log.append(f"{eff_target.name} regenerating {bd.amount}/rd "
+                                f"for {rounds} rds ({eff.name})")
+                continue
             delta = self._apply_buff_to_stats(eff_target, bd)
             # Fall back to the buff definition's own duration when the
             # effect line doesn't specify one — real bug found verifying

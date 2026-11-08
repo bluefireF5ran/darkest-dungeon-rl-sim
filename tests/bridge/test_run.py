@@ -1490,6 +1490,128 @@ def _stop(action, gold, curio_id="travellers_tent_tutorial", area="coAB",
                 curio_id=curio_id, value=LootValue(gold=gold))
 
 
+
+
+
+def test_the_battle_quest_targets_MATCH_the_games_own_counter():
+    """A negative result worth keeping, so nobody re-opens it.
+
+    A raid save carries `raid_instance.battle_all_rooms` --
+    `{current_battle_count, target_battle_count}` -- which is the game's own
+    statement of how far along a `battle_all_rooms` objective is.
+    `route.mandatory_targets` does not read it: it re-derives the objective
+    from the map as "every room with an unspent battle". Those could easily
+    disagree, and if the map demanded more fights than the quest the bridge
+    would spend real risk on fights nothing required.
+
+    Measured over the whole capture corpus, 2026-09-20: **263 paired
+    (raid, map) snapshots, 263 exact agreements, 0 either way.** The map
+    derivation is right. This test re-runs that check so a change to
+    `_rooms_needing_battle` cannot quietly break it.
+    """
+    import json
+    from pathlib import Path as _P
+
+    from data.dson import parse_file
+    from bridge.dungeon_map import read_dungeon_map
+    from bridge.route import _rooms_needing_battle
+
+    traces = _P(__file__).resolve().parents[2] / "archive" / "traces"
+    if not traces.is_dir():
+        pytest.skip("no capture corpus")
+    checked = 0
+    for trace in ("raidsnaps", "raidsnaps2", "raidsnaps3", "raidsnaps4"):
+        d = traces / trace
+        if not d.is_dir():
+            continue
+        for raid in sorted(d.glob("*_persist.raid.json")):
+            mp = raid.with_name(raid.name.replace("persist.raid", "persist.map"))
+            if not mp.exists():
+                continue
+            try:
+                blob = parse_file(raid).to_dict()
+                dungeon = read_dungeon_map(mp)
+            except Exception:                              # noqa: BLE001
+                continue
+            if dungeon is None:
+                continue
+            root = blob.get("base_root", blob)
+            ri = root.get("data", root).get("raid_instance", {})
+            bar = ri.get("battle_all_rooms") or {}
+            if not bar:
+                continue
+            need_quest = max(0, int(bar.get("target_battle_count") or 0)
+                             - int(bar.get("current_battle_count") or 0))
+            assert len(_rooms_needing_battle(dungeon)) == need_quest, (
+                f"{raid.name}: the quest needs {need_quest} more fights and "
+                f"the map derivation says "
+                f"{len(_rooms_needing_battle(dungeon))}")
+            checked += 1
+    if checked < 100:
+        pytest.skip(f"only {checked} paired snapshots - corpus is thin")
+
+
+def test_the_light_is_HELD_where_the_loot_plan_wants_it_dark():
+    """A relight in the corridor the snuff was paid for undoes the play.
+
+    The torch layer is asked before the loot plan exists, so out of combat it
+    sees only "below radiant, torches in the pack" and answers RELIGHT -- in
+    the very area `lootplan` had just snuffed for. Fran, 2026-09-20: *"when
+    you beat a battle and immediately after there is a loot curio ... you
+    should keep the torch low for that part of the dungeon"*.
+
+    The plan's own intended light is the signal, so no weight is invented.
+    """
+    from bridge.run import _dark_pays_here
+
+    dark = _loot_with(_stop("defer", 646.0, curio_id="tent", area="coAB",
+                            torch=0.0))
+    assert _dark_pays_here(dark, "coAB", None) is True
+    assert _dark_pays_here(dark, "rooA", "coAB") is True, "one step away is here"
+    assert _dark_pays_here(dark, "rooZ", "rooY") is False, "not here at all"
+    assert _dark_pays_here(None, "coAB", None) is False
+
+
+def test_a_FIGHT_between_here_and_the_dark_loot_ends_the_scan():
+    """**The bridge oracle caught this one before any live run did.**
+
+    The first version asked only "is there a dark pickup nearby". In `coHM`
+    the next dark stop was the heirloom chest in `rooH`, on the far side of a
+    FIGHT in `rooH` -- so the rule held the light and would have walked the
+    party into a dim combat, against the hard 76 floor that `lootplan` and
+    Fran's own rule are both built on: *"try to never combat on under 75
+    torch"*.
+
+    A `relight` the plan has queued ends the scan for the same reason: it is
+    the plan saying the light is wanted before anything else it has lined up.
+    """
+    from bridge.run import _dark_pays_here
+
+    chest = _stop("take", 900.0, curio_id="heirloom_chest", area="rooH",
+                  torch=0.0)
+    fight = _stop("fight", 0.0, curio_id="", area="rooH", torch=95.0)
+    assert _dark_pays_here(_loot_with(chest), "coHM", "rooH") is True
+    assert _dark_pays_here(_loot_with(fight, chest), "coHM", "rooH") is False
+
+    relight = _stop("relight", 0.0, curio_id="", area="coHM", torch=95.0)
+    assert _dark_pays_here(_loot_with(relight, chest), "coHM", "rooH") is False
+
+
+def test_a_SKIP_and_a_LIT_stop_cannot_hold_the_light():
+    """`skip` is loot nobody is collecting, so it justifies nothing, and a
+    stop the plan wants opened in the light is the opposite of a reason to
+    stay dark. Darkness outside the killing blow is a straight loss."""
+    from bridge.run import _dark_pays_here
+
+    skipped = _loot_with(_stop("skip", 100.0, curio_id="chest", area="coAB",
+                               torch=0.0))
+    assert _dark_pays_here(skipped, "coAB", None) is False
+
+    lit = _loot_with(_stop("take", 100.0, curio_id="chest", area="coAB",
+                           torch=100.0))
+    assert _dark_pays_here(lit, "coAB", None) is False
+
+
 def test_a_DEFERRED_curio_keeps_the_party_in_the_dungeon():
     """A deferral is a PROMISE. `lootplan` only defers because the walk home
     comes back through here, so banking the quest early converts "worth three
@@ -1831,10 +1953,25 @@ def test_the_RETREAT_verdict_comes_out_as_structure():
     instead. Live, that killed a party."""
     from bridge.run import Session
 
-    s = Session(_NoAdvice())
+    adv = _NoAdvice()
+    adv.last_wipe_rate = 0.9            # over FIGHT_RETREAT_WIPE: see below
+    s = Session(adv)
     out = s._battle_update(None, _battle_block(
         "  leaving costs ~5,889 gold, staying ~4,972 - RETREAT"), 0)
     assert out.retreat_advised is True
+
+
+def test_inside_a_fight_only_a_near_certain_WIPE_overrules_the_model():
+    """Fran, 2026-09-23: keep the combat model's decisions its own, and let
+    the dungeon layer pull a party out of a fight only when a wipe is really
+    likely. Below the threshold the verdict waits for the fight to end."""
+    from bridge.run import FIGHT_RETREAT_WIPE, Session
+
+    adv = _NoAdvice()
+    adv.last_wipe_rate = FIGHT_RETREAT_WIPE - 0.05
+    out = Session(adv)._battle_update(None, _battle_block(
+        "  leaving costs ~5,889 gold, staying ~4,972 - RETREAT"), 0)
+    assert out.retreat_advised is False
 
 
 def test_the_POLICYS_OWN_retreat_option_is_not_mistaken_for_the_verdict():
@@ -1849,6 +1986,67 @@ def test_the_POLICYS_OWN_retreat_option_is_not_mistaken_for_the_verdict():
         "     alt: RETREAT on self  7%",
         "  leaving costs ~5,889 gold, staying ~4,972 - worth pushing on"), 0)
     assert out.retreat_advised is False
+
+
+
+def test_a_SELF_cast_heal_is_not_classified_as_an_attack():
+    """The Abomination's Absolution targets the caster. The ledger called it
+    "attack" and logged seven false DIFFERs in two raids (2026-09-24)."""
+    import types
+
+    eng = types.SimpleNamespace(
+        heroes=[types.SimpleNamespace(id=1, skill_tier=0)],
+        _is_ally_skill=lambda sid: False,
+        get_skill_data=lambda sid, level: types.SimpleNamespace(heal_min=3))
+    self_cast = types.SimpleNamespace(skill_id="absolution", hero_id=1,
+                                      target_id=-1)
+    strike = types.SimpleNamespace(skill_id="manacles", hero_id=1, target_id=5)
+    assert advised_kind(eng, self_cast) == "heal"
+    assert advised_kind(eng, strike) == "attack"
+
+
+def test_a_stuck_loot_hold_is_given_up():
+    """Live 2026-09-27: the raid held the party 27 minutes for a deferred
+    knife rack nothing could reach. The held stop joins the given-up set."""
+    from types import SimpleNamespace
+    from bridge.run import Session, _loot_outstanding
+    said = []
+    fake = SimpleNamespace(layers=SimpleNamespace(loot_goal=("coAD", "knife_rack"),
+                                                  abandoned=None),
+                           emit=said.append)
+    Session.abandon_loot_goal(fake)
+    assert fake.layers.abandoned == {("coAD", "knife_rack")}
+    assert said and "knife_rack" in said[0]
+    stop = SimpleNamespace(action="defer", area="coAD", curio_id="knife_rack",
+                           value=SimpleNamespace(worth=lambda: 185.0))
+    assert _loot_outstanding(SimpleNamespace(stops=[stop]),
+                             fake.layers.abandoned) is None
+
+
+def test_the_step_back_to_loot_behind_the_party():
+    """Live 2026-09-27: the walk was over and the heirloom chest sat in the
+    adjacent rooA; nothing aimed the party back at it."""
+    from types import SimpleNamespace
+    from bridge.run import _step_toward
+    graph = {"rooA": {"rooD": "coAD", "rooB": "coAB"},
+             "rooD": {"rooA": "coAD"}, "rooB": {"rooA": "coAB"}}
+    d = SimpleNamespace(graph=lambda: graph)
+    assert _step_toward(d, "rooD", "rooA") == ("coAD", "rooA")
+    assert _step_toward(d, "rooD", "coAD") == ("coAD", "rooA")
+    assert _step_toward(d, "rooD", "coAB") == ("coAD", "rooA")
+    assert _step_toward(d, "coAD", "rooA") == ("rooA", "rooA")
+    assert _step_toward(d, "coAD", "coAB") == ("rooA", "rooA")
+
+
+def test_a_detour_to_a_GIVEN_UP_curio_does_not_hold_the_raid():
+    """Live 2026-09-27: an heirloom chest that did not answer three presses
+    held the raid as "+0 moves away" after the actuator gave up on it."""
+    from bridge.run import Layers
+    plan = _Detours(_D("rooA", "treasure(heirloom_chest)"))
+    choice, _why = Layers._raid_end(_State([_Hero()]), plan, [], None,
+                                    abandoned={("rooA", "heirloom_chest")})
+    assert choice == "return"
+
 
 
 if __name__ == "__main__":

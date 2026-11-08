@@ -180,7 +180,9 @@ python -m data.hero_skills --profile <dir>
 * **Only `curated_comps/`** — `CompLoadoutEntry.source` is what says which
   folder a comp came from, and `composed_comps/` is training coverage nobody
   has played.
-* **Three gates keep it from flying**, each one live visit away:
+* **(Superseded 2026-09-25: the Guild flies. `guild_panel` is banked,
+  skill unlocks and guild ranks are bought and wallet-confirmed. The note
+  below is history.)** **Three gates keep it from flying**, each one live visit away:
   `BUILDING_SCENE_POINTS["guild"]`, `GUILD_MEASURED`, and which element of a
   guild skill row is the selection toggle. `ROSTER_SCROLL_MEASURED` was a
   fourth and is **True** now; the reason it was False is worth keeping,
@@ -456,3 +458,118 @@ That is a behavioural refactor of `ActRunner`'s construction, not a file move,
 and it needs its own session and its own before/after recording. The split
 scripts refuse on cycles and re-parse what they write, so re-running them is
 cheap once the state question is settled.
+
+## Seeing the game, and getting out of it (2026-09-20)
+
+Three things had to be true before an unattended run could play a campaign,
+and none of them was. Full evidence in `docs/changelog/2026-09.md`.
+
+**LAUNCH WITH `-size 1280 720`, TWO TOKENS.** With no `-size` the game takes
+the desktop resolution, and a borderless window covering a monitor exactly
+gets DWM's independent-flip path: `screen.grab` then returns a frame that is
+pure black, or -- far worse -- **frozen on whatever was last composited**,
+which `display_is_live` passes because a still frame the recogniser can name
+is a live game. Measured: eight byte-identical grabs reading `title` while the
+game was on the save-select screen. This file previously recorded `-size` as
+"accepted and ignored"; that was measured with `-size 1600x900`, one token,
+which the parser drops. `window.covers_a_monitor` is the predicate and
+`window.nudge_off_monitor` the recovery for a game somebody else launched --
+it moves, never resizes, because resizing crops the render target instead of
+scaling it.
+
+**THE NAMED CHECKPOINT SLOT IS A POINTER AND A RETRAIN HAS TO BE COPIED INTO
+IT.** Every entry point here defaults to
+`models/dd_combat_ppo_full_expedition.zip`. It held a 1652-wide file for a day
+after the 1836 retrain shipped, so `Advisor` refused on every one of them and
+the dungeon layers carried on deciding -- a night with no combat policy looks
+exactly like a working night. `advisor.checkpoints_at_width` now scans
+`models/` on the refusal path so the message names one that WOULD load.
+
+**THE RAID EXIT IS THE RED WAX SEAL ON THE QUEST BANNER, top left, and it is
+NOT the scroll under it.** `layout.RAID_QUEST_SEAL` (client 55,50 at
+1280x720) ends the raid out of combat; `layout.RAID_ABANDON_QUEST` (52,90) is
+the scroll, and it is what `plan_retreat` clicks INSIDE a fight. They are
+40 px apart and they are different widgets -- measured 2026-09-21 with the
+quest complete: the scroll moved nothing over a six-second watch, the seal
+reached `raid_results` in two. Fran: *"do not click the scroll, click the red
+symbol"*.
+
+`plan_leave_raid` sends ONE click and no confirm -- with the objective met
+the results page comes straight up -- and `_leave_raid` answers a modal only
+if it actually sees one. A RETURN with no quest-complete banner on screen
+uses this instead of waiting for a modal that is shown once and never
+returns; a CONTINUE still needs the banner, because "continue" is only ever
+an answer TO the banner.
+
+Two sessions got this wrong in opposite directions before it was measured --
+first "Continue Raid strands the party", then "the exit is the same pixel as
+the retreat". The tests now pin the two controls as DISTINCT.
+
+**A SCROLLED SAVE LIST IS ITS OWN SCREEN.** Unbanked, it matched nothing and
+`recognise` guessed `dlc` -- and the boot then clicked `dlc_ok`, `modal_ok`
+and `darkest` into the save list, where one of the per-row icons is a DELETE
+button. Nothing was damaged, which was luck. `save_select@scrolled` is banked.
+
+**OWN WHAT THE GAME MADE, NEVER WHAT YOU PREDICTED.** `claim_slot` guesses
+which `profile_<n>` a new campaign lands in and DD disagrees -- asked for
+slot 2, got `profile_7`. `reset.claim_created(before)` diffs a pre-boot
+snapshot instead; `reset.orphans()` sweeps what a killed run left behind,
+using the claim journal as the proof of ownership. Between them, the loop
+stops manufacturing saves nobody can delete.
+
+**A SNUFF MUST REACH 0.** `_snuff_torch` used to require a save write between
+reduction clicks; a snuff is sent mid-turn, so the first read is always
+unwitnessed and it stopped after one. Worth +8 draws / +15% gold at 1-25
+against +12 / +30% at 0, so one step short gives up the bracket the play
+exists for. The remaining `ceil(level / TORCH_STEP)` clicks now go as one
+plan, looped until the torch reads 0 or stops responding, bounded to the
+FIRST candidate when the save never answers.
+
+**A RELIGHT MUST NOT UNDO THE SNUFF.** `_dark_pays_here` holds the light when
+`lootplan` has priced a `take`/`defer` stop below `RADIANT_FLOOR` in the
+party's area or the next one. The plan's own intended light is the signal, so
+no weight is invented, and it is bounded to here-and-next because darkness
+outside the killing blow is a straight loss.
+
+**A STALL THAT PRINTS IS INVISIBLE TO A STALL DETECTOR THAT WATCHES OUTPUT.**
+`note_room_stuck` re-plans every 25 s and prints the whole block, so
+`overnight`'s 180 s no-growth rule never fired and a frozen dungeon burned the
+full play allowance. `run.ROOM_STUCK_LINE` fires after `ROOM_STUCK_GIVE_UP`
+re-plans on a save that has not been written once; the re-planning itself
+stays unbounded. With both bounds in place `PLAY_TIMEOUT` could go to 1800 s,
+which is what a real generated dungeon actually needs -- 900 s was set against
+the two-room Old Road and was cutting real raids off mid-combat.
+
+## Trinkets, building panels, and the embark veto (2026-09-25)
+
+Evidence is in `docs/changelog/2026-09.md` under that date.
+
+**TRINKETS ARE EQUIPPED FROM THE HAMLET, and the grid COMPACTS.** The
+bottom-bar chest (`townlayout.TRINKET_CHEST_BUTTON`) opens the Trinket
+Inventory. A RIGHT-click on a roster portrait opens that hero's sheet beside
+it, and a drag from a cell to an Equipment slot equips (drag back to
+unequip). Within one opening a taken trinket leaves a hole; a REOPEN packs
+what is left to the front. So a cell's position is its rank among the
+trinkets present when the panel opened (`town.equip_trinkets`), never the
+save key. The game saves on the panel CLOSE, so a drag is witnessed on the
+screen (slot box diff) and the save agrees only afterwards. The decision is
+the dd-team-builder's `reequipParty` (`bridge/trinketplan.py`). Picks worn by
+BENCHED heroes are stripped into the chest first.
+
+**EVERY BUILDING SHARES ONE UPGRADE GEOMETRY; what must differ is the
+panel.** `buy_building_upgrades` opens THAT building, confirms the panel,
+clicks the crest, then buys against the wallet, and it stops a building on
+its first unconfirmed rank. `_panel_is_open` needs a banked title plate:
+`stage_coach_panel` and `guild_panel` are banked, and the blacksmith and
+sanitarium pass on their plates' similarity to the coach's.
+
+**THE EMBARK VETO KEEPS THE COIN FLIP.** `bridge/embark_veto.py` re-draws a
+comp the simulator expects to lose half its party on
+(`VETO_MEAN_DEATHS`). With `veto=None` the flip is byte-identical. It is a
+gate, not a ranking: "an option that works", which is Fran's own wording.
+
+**THE FIGHTS AHEAD ARE KNOWN.** `bridge/fights_ahead.py` reads each battle
+tile's `mash_index` into its `<zone>.<tier>.mash.darkest` group, and the
+survival rollout fights those instead of sampling. Read it through `_stage`:
+a raw read of a save mid-write returned `[]` and silently fell back to
+sampling.

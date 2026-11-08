@@ -108,6 +108,30 @@ python tools/pe_anchors.py --keys                  # the whole anchor table
 python tools/pe_anchors.py --telemetry             # what the game LOGS for free
 ```
 
+**The whole program is decompiled (2026-10-04)**, both pinned builds, under
+`D:\ghidra\out\<sha8>\` with indexes; `DECOMP.md` says what is in it.
+
+```bash
+python tools/ghidra_export.py --all            # name RTTI methods + decompile everything
+python tools/ghidra_diff.py <old export> <new export>   # map addresses across a patch
+python tools/decomp_lookup.py --string combat_retreat_chance   # who reads it
+python tools/decomp_lookup.py --fn Battle::ApplyHit --callers  # C, callers, callees
+python tools/rules_audit.py                    # every rules.json key: parsed? read? by whom?
+python tools/damage_oracle.py --list           # F9 against the running game (record_play_full.bat)
+```
+
+**`rules_audit.py` is the F1/F7 hunt automated, and it re-finds both on its
+own.** "Parsed, unread" is a lead, not a verdict: a struct read through a
+pointer is invisible to a text search. `data/decomp_facts.json` is where a
+confirmed fact goes, with the repo constant it governs; its test runs without
+the export.
+
+**A game patch moves every address, and the tools were split across it for
+three weeks.** `pe_anchors.py` reads the install; the Ghidra program is a
+pinned copy. `ghidra_export.py --key` now refuses when the two are different
+builds. After a patch: pin the new exe as `Darkest_<sha8>.exe`, import it,
+`--all` it, and run `ghidra_diff.py` before trusting any cited address.
+
 Three rules that cost a wrong answer each on the first run, all enforced in the tool now:
 **a key is stored in the form its own file uses** (`cutoffAlwaysMiss`, but
 `combat_move_skill:` with the colon and `.per_battle_limit` with the dot); **"absent" is
@@ -268,6 +292,81 @@ tracked fixture, over a corpus that has grown 166 -> 186 pairs.
   captures are gitignored. Refresh it with `--emit`, extend the corpus with
   `--traces <dir>`.
 
+
+### A third oracle: an independent TRANSCRIPTION (2026-09-19)
+
+```bash
+python tools/pizzarat_oracle.py                 # grade every field
+python tools/pizzarat_oracle.py --field launch  # one field only
+python tools/pizzarat_oracle.py --refresh DIR   # re-extract from the .js
+```
+
+`hit_oracle` and `brain_oracle` read the RUNNING game out of
+`archive/traces/`. This one reads a third party's reading of the same game
+files -- the community reference at `pizzarat105.github.io/PizzaRatReview`,
+which lists every enemy and boss skill per difficulty tier with its accuracy,
+damage band, crit, and the ranks it launches from and targets. 424 records
+are vendored at `tools/pizzarat/enemy_skills.json`; the strategy notes for 11
+bosses and 46 enemies are at `tools/pizzarat/strategy_notes.json`.
+
+**It is NOT a ruler**, so it is not in `RULERS` and `engine/` may agree with
+it freely: it grades the DATA LAYER against a second copy of the game's own
+numbers, the same standing `hit_oracle` and `brain_oracle` have. A ruler
+grades the POLICY.
+
+**What it caught on its first run**: the enemy side was ignoring `.launch`
+entirely -- 228 of 694 enemy skills usable from ranks the game forbids, which
+made disruption a no-op. See `docs/changelog/2026-09.md`.
+
+**Adjudicate every disagreement against the monster's own `.info.darkest`,
+never against the site.** Its first run produced four, and the game files
+sided with the ENGINE on all four -- about 4% of its gradeable numeric fields
+are wrong. Those four are listed in `KNOWN_SITE_ERRORS` with the record that
+settles each, and only a disagreement outside that list turns the run red.
+
+**Coverage is 389 of 424 records** (267 of them resolved through the game's
+own display-name map). The site derives its ids from display names, so
+`graveyard_slash` is not a skill id -- the game calls it `sword_strike` and
+only names it that in `localization/miscellaneous.string_table.xml`, whose
+`str_monster_skill_<id>` entries are read English-block-only (the file ships
+twelve languages, and pooling them makes "Bite" ambiguous across languages
+as well as within English).
+
+**It ABSTAINS rather than guess.** The site carries one record per (skill,
+tier) but the game lets each monster file give the same skill id its own
+numbers -- `spider_bite` is `.launch 12` on the Spitter and `.launch 1234`
+on the Webber, both correct. Grading one record against every owner would
+manufacture a disagreement against whichever one it was not describing, so
+those are counted and skipped; the run says how many.
+
+### The unread-key audit -- `tools/monster_key_audit.py` (2026-09-19)
+
+```bash
+python tools/monster_key_audit.py                    # undeclared keys, if any
+python tools/monster_key_audit.py --all              # the whole table
+python tools/monster_key_audit.py --carriers <field> # who ships it
+```
+
+Every key the monster files carry, against every key `data/`, `engine/` and
+`env/` mention. 115 (record, field) pairs: 68 read, 47 declared-unread with a
+reason each, 0 undeclared.
+
+**Why it is code and not prose.** `ASSUMPTIONS.md` has carried this audit for
+a long time and was accurate about every key it listed -- but `shared_health`
+was never on it, and that is The Flesh's single HP pool against the
+simulator's four bars. It was found by reading a community boss guide, not by
+the audit, and had been missing for the life of the project. Prose does not
+re-run; `tests/suite/test_monster_key_audit.py` does, and it also checks that
+the audit can still go red and that no declaration has gone stale.
+
+**Its one weakness, and it is the important one.** A key counts as read when
+its field name appears anywhere in the source. That cannot raise a false
+alarm, only miss one: a field that is PARSED and then never consulted reads
+as handled. That is exactly how `.launch` hid for the life of the project --
+`data/` decoded it faithfully and `_monster_ai.py` never looked at it. **This
+tool finds keys nobody has looked at; it cannot find keys someone parsed and
+then ignored.** For those the instrument is `tools/pizzarat_oracle.py`, which
+grades behaviour rather than coverage.
 
 ### Never run a long job unguarded — `tools/safe_run.py` (2026-09-04)
 

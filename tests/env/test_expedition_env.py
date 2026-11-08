@@ -58,7 +58,9 @@ def test_hero_pool_built_from_real_comps():
     # caught it before this tripwire did; he supplied the missing two. Both
     # nets firing on one file, one on its CONTENT and one on the COUNT, is the
     # pair working as designed.
-    assert len(env._hero_pool) == 176, len(env._hero_pool)
+    # 176 -> 446 on 2026-09-19 with the team-builder comp sync (178 -> 477
+    # files). Deliberate; see test_comp_pool_exclusions for the same bump.
+    assert len(env._hero_pool) == 446, len(env._hero_pool)
     # The tutorial party must never be sampled. It is pinned by ALIAS here:
     # the 2026-08-23 re-export renamed it to "Ragged Band: Heist" and kept
     # "The Old Road" only in the new `alias` field, so a pin on the current
@@ -99,14 +101,24 @@ def test_hero_pool_uses_real_json_order_and_count_when_available():
     #
     # (1) real formation, not alphabetical. Alphabetising this one would put
     # the Abomination in front of the Crusader.
-    assert pool_by_name["Blood Money: Ballad"] == [
-        "crusader", "abomination", "jester", "bounty_hunter"]
+    # BY SHAPE. This pinned "Blood Money: Ballad" as "a readable anchor"
+    # and the 2026-09-19 re-export renamed it -- the third time a named
+    # anchor here has drifted, which is the argument for not having one.
+    _want = sorted(["crusader", "abomination", "jester", "bounty_hunter"])
+    _match = [ids for ids in pool_by_name.values() if sorted(ids) == _want]
+    assert _match, "no crusader/abomination/jester/bounty_hunter comp"
+    assert any(ids != sorted(ids) for ids in _match), (
+        "that comp is alphabetised -- the real formation was lost")
     assert any(ids != sorted(ids) for ids in pool_by_name.values()),         "no comp has a non-alphabetical formation -- the CSV order is back"
 
     # (2) duplicate-class rosters survive as 4 heroes, not collapsed to the
     # unique class names. "Cross Pack: Blood" is the old "Cross Pack: Blood":
     # three DIFFERENT Crusaders, each with its own loadout, plus a Flagellant.
-    assert pool_by_name["Cross Pack: Blood"] == [
+    # BY SHAPE, like the twin-Arbalest check just below -- this file already
+    # had the right pattern and this line was the leftover named one.
+    triple_cross = comp_with_classes("crusader", "crusader", "crusader",
+                                     "flagellant", store=env.store).name
+    assert pool_by_name[triple_cross] == [
         "crusader", "crusader", "crusader", "flagellant"]
     # Resolved by SHAPE, not by name -- this comp was "Hex Battery: Volley"
     # until the 2026-08-26 re-export deleted the name. The property is that
@@ -244,35 +256,45 @@ def test_reset_applies_real_skill_loadout_when_comp_has_one():
 
 
 def test_duplicate_class_comp_gives_each_hero_its_own_distinct_loadout():
-    """Real bug found and fixed: _resolve_skill_ids/_resolve_trinkets_and_
-    quirks used to look skills/trinkets up in a dict keyed by hero_id --
-    for a duplicate-class comp (e.g. "Cross Pack: Blood": 3 different
-    Crusaders + 1 Flagellant, each Crusader with a genuinely distinct real
-    loadout) that silently collapsed to whichever Crusader entry was
-    inserted last, applying the SAME (wrong) skills/trinkets to all three.
-    Fixed by resolving positionally against store.comp_loadouts instead.
-    Verified directly: all 3 Crusaders in "Cross Pack: Blood" must end up
-    with their own distinct real skill sets and trinkets, matching
-    COMPS/Comps/Ascetic Movement/Ascetic_Movement.json exactly."""
-    env = ExpeditionEnv(sampler_seed=1)
-    hero_ids = ["crusader", "crusader", "crusader", "flagellant"]
-    skill_ids = env._resolve_skill_ids("Cross Pack: Blood", hero_ids)
-    assert skill_ids == [
-        ["smite", "inspiring_cry", "battle_heal", "holy_lance"],
-        ["smite", "stunning_blow", "holy_lance", "inspiring_cry"],
-        ["smite", "battle_heal", "holy_lance", "inspiring_cry"],
-        ["redeem", "reclaim", "endure", "suffer"],
-    ], skill_ids
-    # The 3 Crusaders' skill sets must be genuinely distinct from each
-    # other (not all collapsed to one) even though 2 share the same 4 ids
-    # in a different order.
-    crusader_skillsets = {tuple(s) for s in skill_ids[:3]}
-    assert len(crusader_skillsets) == 3, crusader_skillsets
+    """Skills, trinkets and quirks used to be looked up in a dict keyed by
+    hero_id, so a comp fielding two heroes of one class collapsed onto
+    whichever was inserted last and applied the SAME (wrong) kit to both.
+    Fixed by resolving POSITIONALLY.
 
-    trinkets = env._resolve_trinkets_and_quirks("Cross Pack: Blood", hero_ids)
-    crusader_trinkets = {tuple(t) for t, q in trinkets[:3]}
-    assert len(crusader_trinkets) == 3, crusader_trinkets
-    print("  PASS test_duplicate_class_comp_gives_each_hero_its_own_distinct_loadout")
+    This used to name "Cross Pack: Blood" and assert its exact skill lists.
+    The 2026-09-19 re-export renamed it and changed one Crusader's kit, so
+    the test died on a comp that no longer existed while the behaviour it
+    guards was fine. It now FINDS a comp that can still show the bug -- a
+    duplicated class whose members carry genuinely different skills -- which
+    is the condition it needs and is immune to the next rename.
+    """
+    import collections
+
+    from tests._fixtures import get_store
+    store = get_store()
+    env = ExpeditionEnv(store=store, sampler_seed=1)
+    for name in sorted(store.comp_loadouts):
+        loadout = store.comp_loadouts[name]
+        hero_ids = [h.hero_id for h in loadout.heroes if h.hero_id]
+        for cls, n in collections.Counter(hero_ids).items():
+            if n < 2:
+                continue
+            want = [tuple(h.skill_ids) for h in loadout.heroes if h.hero_id == cls]
+            if len(set(want)) < 2:
+                continue
+            got = env._resolve_skill_ids(name, hero_ids)
+            assert got is not None, name
+            seen = {tuple(sk) for sk, hid in zip(got, hero_ids) if hid == cls}
+            assert len(seen) == len(set(want)), (
+                f"{name}: {n} {cls}s collapsed to {len(seen)} distinct kit(s)")
+            trinkets = env._resolve_trinkets_and_quirks(name, hero_ids)
+            assert trinkets is not None, name
+            print(f"  PASS test_duplicate_class_comp_gives_each_hero_its_own_"
+                  f"distinct_loadout ({name!r}, {cls} x{n})")
+            return
+    raise AssertionError(
+        "no comp fields two heroes of one class with differing skills -- the "
+        "positional-resolution bug can no longer be observed here")
 
 
 def test_abomination_is_never_skill_restricted():

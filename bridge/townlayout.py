@@ -311,12 +311,26 @@ def building_button(name: str, game_dir: Path = GAME_DIR):
     size = _field("navigation", "building_navigation_layout", "base_size", game_dir)
     if spacing is None or size is None:
         return None
-    # The strip is `base_size` wide (128) and each button is `button_spacing`
-    # tall (68); the click goes to the middle of the cell in both axes, which
-    # is the only part of it guaranteed to be inside the sprite at any scale.
+    # **`base_size` IS THE STRIP, NOT THE BUTTON, and centring on it misses.**
+    # The strip is 128x1000 -- wide enough for the frame around a column of
+    # ten -- while each button is `button_spacing` square, 68x68. Half the
+    # STRIP is 64, which puts the click at design x 134 and lands to the RIGHT
+    # of every icon; half a BUTTON is 34, design x 104.
+    #
+    # Measured live 2026-09-21 on Fran's campaign: the icons sit at client
+    # x 52-80 at 1280x720, centre ~66, and the old point resolved to 89 --
+    # outside the sprite. A click there did nothing, which is why the Guild
+    # was unreachable and every skill unlock the embark plan had already
+    # BUDGETED FOR was skipped with "the guild's scene point has never been
+    # measured". The party then embarked carrying a comp whose skills it had
+    # not been given. Fran: *"the former comp didnt truly use the potential of
+    # the comp"*.
+    #
+    # The y was right all along: design 400 for the guild, client 267 against
+    # a measured icon centre of 261.
     return _pt(base, start,
                (spacing[0] * index, spacing[1] * index),
-               (size[0] / 2.0, spacing[1] / 2.0))
+               (spacing[1] / 2.0, spacing[1] / 2.0))
 
 
 # Half a close glyph. `close_pos` anchors its TOP-LEFT, and clicking a corner
@@ -1160,7 +1174,109 @@ def roster_scroll(down: bool = True, game_dir: Path = GAME_DIR):
 # (133.5, 35.3), and the trees were not drawn at all until the building crest
 # was clicked. Expect a residual here too. `bridge/town.py` refuses to click
 # either until a frame of the panel is banked; un-gating is one visit.
-GUILD_MEASURED = False
+#: The Guild's HERO SKILL column, measured live 2026-09-21 at 1280x720.
+#
+# **This is the skill itself, not a rank node.** Each row is one of the
+# class's seven skills, drawn in the order `store.heroes[cls].skills` lists
+# them -- verified against Dismas, whose padlocked rows were 1, 3 and 6 and
+# whose store order puts `wicked_slice`, `point_blank_shot` and
+# `duelist_advance` at exactly those indices. A padlocked row costs 1,000
+# gold, which is the number `embarkplan` has been budgeting for all along.
+# The four columns to its right are RANK upgrades and are gated on the
+# building's own tree; they are not what an unlock buys.
+#
+# The tree is drawn only once a hero is dragged into the panel's slot, which
+# is why this needed a live frame. Measured centres: first row (757, 198),
+# seventh (757, 563), so the pitch is 60.8 -- which is the shipped
+# `skill_spacing 0 91` at the 1920->1280 scale (60.7), so the FILE was right
+# about the spacing all along and only the origin needed a frame.
+#
+# Proved by spending: clicking row 1 for Dismas took the wallet 10,865 ->
+# 9,865, exactly the 1,000 the plan prices an unlock at.
+GUILD_SKILL_X = 757.0 / 1280
+GUILD_SKILL_Y0 = 198.0 / 720
+GUILD_SKILL_DY = 60.8 / 720
+
+#: Where a hero is dropped to draw their tree at all.
+GUILD_HERO_SLOT = (578.0 / 1280, 141.0 / 720)
+
+# --- trinkets (measured live 2026-09-25, 1280x720 client) -------------------
+# The chest on the Hamlet's bottom bar opens the Trinket Inventory; a
+# RIGHT-click on a roster portrait opens that hero's sheet beside it, and a
+# drag from a grid cell onto an Equipment slot equips (dragging back
+# unequips). The grid is POSITIONAL: a taken trinket leaves a hole and nothing
+# reflows, so cell n is the estate save's `trinkets.items.<n>` for the whole
+# visit. Seven columns; the column pitch is measured, the ROW pitch is read
+# off the grid lines and has not yet been exercised by a drag.
+TRINKET_CHEST_BUTTON = (1053.0 / 1280, 672.0 / 720)
+TRINKET_PANEL_CLOSE = (1004.0 / 1280, 111.0 / 720)
+HERO_SHEET_CLOSE = (1001.0 / 1280, 111.0 / 720)
+HERO_TRINKET_SLOTS = ((150.0 / 1280, 285.0 / 720), (207.0 / 1280, 285.0 / 720))
+TRINKET_GRID_COLS = 7
+TRINKET_CELL0 = (635.0 / 1280, 262.0 / 720)
+TRINKET_CELL_PITCH = (53.0 / 1280, 109.0 / 720)
+#: Rows drawn before the grid needs its scroll arrows.
+TRINKET_GRID_ROWS_VISIBLE = 3
+#: The Trinket Inventory's header buttons, identified by their tooltips live
+#: 2026-09-27 at 1280x720: "Unequip all trinkets" (raises "Unequip all
+#: trinkets on heroes?" with Yes on `layout.MODAL_OK`), "Sort by character
+#: class restriction", "Sort by rarity", "Sort by trinket name". A sort
+#: REWRITES the estate save's order on the close, so after one the save keys
+#: are the drawn order -- verified on the 20-trinket chest the same day.
+TRINKET_UNEQUIP_ALL = (891.0 / 1280, 112.0 / 720)
+TRINKET_SORT_CLASS = (920.0 / 1280, 112.0 / 720)
+TRINKET_SORT_RARITY = (948.0 / 1280, 112.0 / 720)
+TRINKET_SORT_NAME = (976.0 / 1280, 112.0 / 720)
+#: The hero sheet's Combat Skills row: seven icons in the class's upgrade-file
+#: order (the Guild's), measured live 2026-09-27 at client x 659 + 53.3 i,
+#: y 193. A click toggles one: it deselects a selected skill and selects an
+#: unselected one while fewer than four are selected. The save takes the new
+#: `selected_combat_skills` when the sheet closes (crush -> rampart on a
+#: Man-at-Arms, witnessed the same day).
+SHEET_SKILL0 = (659.0 / 1280, 193.0 / 720)
+SHEET_SKILL_PITCH = 53.3 / 1280
+
+
+def sheet_skill(index: int) -> tuple[float, float]:
+    return (SHEET_SKILL0[0] + index * SHEET_SKILL_PITCH, SHEET_SKILL0[1])
+
+
+def trinket_cell(index: int) -> tuple[float, float]:
+    """The centre of inventory cell `index` (the save's slot key)."""
+    col, row = index % TRINKET_GRID_COLS, index // TRINKET_GRID_COLS
+    return (TRINKET_CELL0[0] + col * TRINKET_CELL_PITCH[0],
+            TRINKET_CELL0[1] + row * TRINKET_CELL_PITCH[1])
+
+#: The four RANK columns to the right of the skill, measured on the same
+#: frame: client x 823.3, 873.3, 923.3, 974.0 at 1280x720.
+GUILD_RANK_X0 = 823.3 / 1280
+GUILD_RANK_DX = 50.2 / 1280
+
+
+def guild_skill_point(index: int):
+    """Click point for the `index`-th skill of the hero in the panel.
+
+    `index` is the position in `store.heroes[hero_class].skills`, which is
+    the order DD draws the rows in.
+    """
+    if not isinstance(index, int) or isinstance(index, bool) or index < 0:
+        return None
+    if index > 6:                 # seven skills, and the eighth row is not drawn
+        return None
+    return (GUILD_SKILL_X, GUILD_SKILL_Y0 + GUILD_SKILL_DY * index)
+
+
+GUILD_MEASURED = True
+
+#: The Blacksmith's rank buttons for a hero in its slot, MEASURED live
+#: 2026-09-28 with an Experienced Flagellant in the slot: weapon row boxes at
+#: client x 828.5 / 878.5 / 928.5 / 978.5, y 238.5; armour row y 355.0. The
+#: derived composition put them at (431, 81) -- the same ~(+400, +157)
+#: residual the Guild's derived rows had.
+BLACKSMITH_MEASURED = True
+BLACKSMITH_RANK0 = (828.5 / 1280, 238.5 / 720)
+BLACKSMITH_RANK_DX = 50.0 / 1280
+BLACKSMITH_ROW_DY = 116.5 / 720
 
 # The Guild draws one row per skill and the hero carries seven.
 GUILD_SKILL_ROWS = 7
@@ -1173,21 +1289,31 @@ def guild_skill_node(skill: int, rank: int = 0, game_dir: Path = GAME_DIR):
     order `data/town_costs.py` reads out of `<class>.upgrades.json`); `rank` 0
     is the unlock, which is the only one this campaign can afford.
     """
-    gap = _field("guild", "guild_layout", "skill_spacing", game_dir)
-    node = _field("guild", "guild_upgrade_tree_layout",
-                  "requirement_spacing", game_dir)
-    if gap is None or node is None:
-        return None
     if not _index_ok(skill, GUILD_SKILL_ROWS) or not _index_ok(rank):
         return None
-    return _pt(
-        _field("building", "building_base_layout", "body_base_pos", game_dir),
-        _field("guild", "guild_layout", "skill_pos", game_dir),
-        _field("guild", "guild_upgrade_tree_layout", "icon_offset", game_dir),
-        _field("guild", "guild_upgrade_tree_layout",
-               "requirement_start_offset", game_dir),
-        (gap[0] * skill, gap[1] * skill),
-        (node[0] * rank, node[1] * rank))
+    # **MEASURED, NOT DERIVED -- the composition lands 330x133 client pixels
+    # away.** The shipped fields give (427, 65) for row 0 where the panel
+    # actually draws it at (757, 198), which is the same kind of residual the
+    # stage coach needed (133.5, 35.3 in design pixels) and which this
+    # function's own docstring warned to expect.
+    #
+    # What the FILES got right is the pitch, and that is why this is a
+    # residual rather than a rewrite: `skill_spacing 0 91` is 60.7 client
+    # against a measured 60.8 down the rows, and `requirement_spacing 75 0`
+    # is 50.0 against a measured 50.2 across the ranks. Both are kept as the
+    # spacing; only the origin comes from the frame.
+    #
+    # Measured live 2026-09-21 with Dismas in the panel, and PROVED by
+    # spending: rank 0 of row 0 took the wallet 10,865 -> 9,865, the exact
+    # 1,000 `embarkplan` prices an unlock at.
+    row = guild_skill_point(skill)
+    if row is None:
+        return None
+    if rank == 0:
+        return row
+    # Rank 0 is the skill itself; the upgrade columns start further right and
+    # are gated on the building's own tree, so nothing buys them yet.
+    return (GUILD_RANK_X0 + GUILD_RANK_DX * (rank - 1), row[1])
 
 
 def blacksmith_node(row: int, rank: int = 0, game_dir: Path = GAME_DIR):
@@ -1198,12 +1324,15 @@ def blacksmith_node(row: int, rank: int = 0, game_dir: Path = GAME_DIR):
     two of the twelve live heroes have. It exists so the panel can be opened
     and REPORTED before it is ever trusted.
     """
+    if not _index_ok(row, 2) or not _index_ok(rank, 4):
+        return None
+    if BLACKSMITH_MEASURED:
+        return (BLACKSMITH_RANK0[0] + BLACKSMITH_RANK_DX * rank,
+                BLACKSMITH_RANK0[1] + BLACKSMITH_ROW_DY * row)
     gap = _field("blacksmith", "blacksmith_layout", "equipment_spacing", game_dir)
     node = _field("blacksmith", "blacksmith_upgrade_tree_layout",
                   "requirement_spacing", game_dir)
     if gap is None or node is None:
-        return None
-    if not _index_ok(row, 2) or not _index_ok(rank):
         return None
     return _pt(
         _field("building", "building_base_layout", "body_base_pos", game_dir),

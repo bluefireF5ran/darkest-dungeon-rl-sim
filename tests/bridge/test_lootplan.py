@@ -42,6 +42,67 @@ def _actions(plan, *kinds):
 
 # -- the acceptance test --
 
+def test_a_party_ALREADY_in_the_dark_defers_nothing():
+    """Fran, 2026-09-21:
+
+        if it's already a 0 torch there is also not a use on deferring that
+        as well as you won't increase that value later, this covers cases
+        like combat with chest rooms for example
+
+    The module already cut deferral after a PLANNED snuff and when no battle
+    exists at all -- both ask where the snuff falls, and neither asked what
+    the torch reads NOW. Walking in at 0 is exactly where a fight leaves you,
+    since the snuff lands before the killing blow, so a chest in that room
+    was being deferred for a darkness it already had.
+
+    The cut is narrow: it fires only when the light is out AND is not coming
+    back. A relight ahead means the curio after it WOULD be opened lit, and
+    then deferring buys a torch again -- which is the whole reason deferral
+    exists.
+    """
+    from bridge.lootplan import plan_loot
+
+    def verdicts(torch, inventory):
+        plan = plan_loot(_old_road(), _quest(), here="rooA", torch=torch,
+                         inventory=inventory)
+        return [s.action for s in plan.stops
+                if s.action in ("take", "defer", "skip")]
+
+    assert "defer" in verdicts(100.0, {"torch": 4}), (
+        "lit with torches in the pack is the case deferral is FOR")
+    assert "defer" not in verdicts(0.0, {}), (
+        "already dark with no torch to spend -- the curio is going to be "
+        "opened in the dark either way, so deferring only risks losing it")
+    assert "defer" in verdicts(0.0, {"torch": 3}), (
+        "dark but able to relight: the light IS coming back, so the deferral "
+        "is worth a torch again")
+
+
+def test_a_deferral_BUYS_A_TORCH_and_the_backtrack_must_collect_it():
+    """Why deferral exists, in Fran's words, 2026-09-21:
+
+        deferring a loot curio can be useful to maintain torches to have a
+        safe number of torches for the dungeon, but when you beat the dungeon
+        or cases like one way exits you should snuff torch to max loot value
+        when backtracking
+
+    So the saving is a TORCH, not only the dark multiplier -- the curio is
+    opened later in the dark instead of light being held for it. That makes
+    the backtrack load-bearing: a deferral nothing returns for is a forfeit,
+    and one cost a strongbox and 880 gold live the same night.
+
+    `WALKS_HOME` was briefly False on the reasoning that the red-seal exit
+    ends a raid from wherever the party stands. That is true of the EXIT and
+    false of the plan -- the seal is pressed at the END of the backtrack, not
+    instead of it.
+    """
+    from bridge import lootplan
+
+    assert lootplan.WALKS_HOME is True, (
+        "deferral is priced on the backtrack; turning it off forfeits every "
+        "deferred curio rather than saving a torch")
+
+
 def test_the_optimiser_reproduces_the_route_FRAN_described():
     """His words, 2026-09-06:
 
@@ -53,11 +114,29 @@ def test_the_optimiser_reproduces_the_route_FRAN_described():
     Nothing in `bridge/` names the Old Road, the tent or the chest. The plan
     below is what falls out of "hold a torch floor on planned fights, then
     maximise expected loot" over the shipped loot tables.
+
+    **This route is pinned under the premise it was given.** Fran described
+    it when the party walked back to the entrance to hand the quest in, and
+    every deferral in `lootplan` is priced on that walk. Since 2026-09-21 the
+    exit is the quest banner's red seal, which ends the raid from wherever
+    the party stands, so `WALKS_HOME` is False and nothing is deferred --
+    see `test_nothing_is_deferred_when_the_party_does_not_walk_home`.
+
+    The optimiser is unchanged and still reproduces his route exactly when
+    the premise holds, which is what this test exists to show. Forcing the
+    flag here keeps his words on the record rather than editing them to match
+    a behaviour change they predate.
     """
+    from bridge import lootplan
     from bridge.lootplan import plan_loot
 
-    plan = plan_loot(_old_road(), _quest(), here="rooA", torch=100.0,
-                     inventory={})
+    was = lootplan.WALKS_HOME
+    lootplan.WALKS_HOME = True
+    try:
+        plan = plan_loot(_old_road(), _quest(), here="rooA", torch=100.0,
+                         inventory={})
+    finally:
+        lootplan.WALKS_HOME = was
     order = [(s.action, s.area, s.tile) for s in plan.stops
              if s.action != "walk"]
 
@@ -156,6 +235,19 @@ def test_the_assignment_beats_taking_the_best_each_time():
 
 # -- the torch half --
 
+def test_a_loot_row_draws_each_table_its_count_of_times():
+    """`curio_type_library.csv`: a locked strongbox is Loot `A` x2 bare-handed
+    (half the time) and `A` x3 with the key -- `<- # Draws`, not weights. Read
+    as weights, every curio paid ONE draw (2026-10-11)."""
+    from bridge.lootplan import curio_options
+    from data.loot_loader import load_loot_tables
+    a = load_loot_tables(str(GAME_DIR)).expected("A", 1, "crypts").gold
+    opts = {o.item: o.base.gold for o in curio_options("locked_strongbox", 1, "crypts")}
+    assert a > 0
+    assert abs(opts["skeleton_key"] - 3 * a) < 1e-6
+    assert abs(opts[None] - 0.5 * 2 * a) < 1e-6
+
+
 def test_a_curio_that_draws_no_loot_earns_nothing_from_the_dark():
     """The bonus is an extra draw on a draw. An early version credited the
     chest bonus to `bandits_trapped_chest` bare-handed -- whose only outcome
@@ -199,10 +291,10 @@ def test_light_is_a_budget_and_a_short_pack_says_so():
 
 
 def test_the_torch_is_topped_up_BEFORE_the_light_collapses():
-    """`tile_light_loss` is 1 a tile above 75 and 6 below, so a torch bought
-    early buys 25 tiles and the same torch bought late buys four. Measured on
-    a real capture: topping up on arrival rather than at the fight took the
-    same plan from four torches to two."""
+    """Since 2026-09-23 a new tile costs 6 at ANY light (measured live), so
+    this long captured map cannot be lit on 8 torches -- the plan spends them
+    and names the fights it could not light. With a big enough pack it lights
+    every fight, relighting before each one that would otherwise start dark."""
     from bridge.dungeon_map import read_dungeon_map
     from bridge.lootplan import plan_loot
     from bridge.route import read_quest
@@ -214,9 +306,10 @@ def test_the_torch_is_topped_up_BEFORE_the_light_collapses():
     if dungeon is None:
         pytest.skip("that capture did not decode")
     quest = read_quest(str(found[0]).replace("map.json", "raid.json"))
-    plan = plan_loot(dungeon, quest, torch=100.0, inventory={"torch": 8})
+    short = plan_loot(dungeon, quest, torch=100.0, inventory={"torch": 8})
+    assert short.dark_battles and short.torches_left == 0
+    plan = plan_loot(dungeon, quest, torch=100.0, inventory={"torch": 24})
     assert not plan.dark_battles, plan.dark_battles
-    assert plan.torches_spent <= 3, plan.torches_spent
 
 
 # -- properties that must hold on every map --
@@ -487,6 +580,17 @@ def test_a_heal_curio_in_a_REVISITED_corridor_is_taken_on_the_way_out():
                                   torch=100.0, inventory={"torch": 4})
     finally:
         lootplan.pays_for_the_dark = real
+    # **THE PREMISE MOVED, AND THE GUARD FOLLOWS IT.** Deferral is priced on
+    # the party walking back to the entrance, and since 2026-09-21 it does
+    # not: the exit is the quest banner's red seal, which ends the raid from
+    # wherever the party stands. `lootplan.WALKS_HOME` is that fact, and with
+    # it False nothing is deferred at all -- so the rule below has nothing to
+    # consult, and what must hold instead is that nothing was deferred.
+    if not lootplan.WALKS_HOME:
+        assert not [s for s in plan.stops if s.action == "defer"], (
+            "the party does not walk home, so a deferral is a forfeit -- "
+            "live 2026-09-21 that lost a strongbox and 880 gold")
+        return
     assert seen, "the deferral rule never asked what the curio pays"
     for stop in plan.stops:
         if stop.action == "defer":

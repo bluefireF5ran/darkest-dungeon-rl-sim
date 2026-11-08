@@ -35,8 +35,9 @@ ROSTER = ["crusader", "highwayman", "plague_doctor", "vestal", "leper",
 
 
 class _Hero:
-    def __init__(self, hero_class):
+    def __init__(self, hero_class, in_party=False):
         self.hero_class = hero_class
+        self.in_party = in_party
 
 
 class _Town:
@@ -146,3 +147,40 @@ def test_the_park_point_is_outside_the_recogniser_s_signature_box():
     px, py = town.CURSOR_PARK
     assert not (x0 <= px <= x1 and y0 <= py <= y1)
     assert 0.0 < px < 1.0 and 0.0 < py < 1.0
+
+# -- the list draws the roster MINUS the party bar --------------------------
+
+def test_a_hero_in_the_PARTY_is_not_in_the_list():
+    """**DD moves a seated hero out of the roster list**, so a roster of 11
+    with 3 seated draws exactly 8 -- which is also `ROSTER_ROWS_VISIBLE`, so
+    nothing can scroll and the chevron is not drawn at all.
+
+    Measured live 2026-09-22 on Fran's campaign: save rows 3, 6 and 9 were in
+    the party, the list drew the other eight with save row 0 in its TOP row,
+    and matching the 11-long save sequence against 8 drawn portraits reported
+    offset 2. The seat for save row 0 was refused as "not on screen", the
+    scroll could not move a list already at its top, and the night looped.
+    """
+    town_obj = _Town(ROSTER[:11])
+    for i in (3, 6, 9):
+        town_obj.heroes[i].in_party = True
+    drawn = town.drawn_roster(town_obj)
+    assert len(drawn) == 8
+    assert [h.hero_class for h in drawn] == [
+        c for i, c in enumerate(ROSTER[:11]) if i not in (3, 6, 9)]
+
+
+def test_eight_drawn_rows_cannot_scroll_whatever_the_save_holds():
+    """The guard that failed: `len(town.heroes) <= ROSTER_ROWS_VISIBLE` asked
+    the save, and the save is not what is drawn."""
+    town_obj = _Town(ROSTER[:11])
+    for i in (3, 6, 9):
+        town_obj.heroes[i].in_party = True
+    assert town._roster_offset(None, town_obj) == 0
+
+
+def test_nobody_seated_leaves_the_list_exactly_as_it_was():
+    """The fix may not change the ordinary case."""
+    town_obj = _Town(ROSTER)
+    assert [h.hero_class for h in town.drawn_roster(town_obj)] == ROSTER
+

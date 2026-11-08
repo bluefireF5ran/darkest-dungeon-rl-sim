@@ -175,7 +175,10 @@ def test_the_destination_room_resolves_to_its_own_box(frame, tutorial):
     px, py = point[0] * frame.shape[1], point[1] * frame.shape[0]
     box = next(b for b in mappanel.find_boxes(frame) if b.x0 > 1800)
     assert box.contains(px, py)
-    assert px == pytest.approx(1884, abs=3) and py == pytest.approx(1238, abs=3)
+    # The click is the fit's prediction clamped into the box since 2026-09-28
+    # (a room merged with its corridor has its centre ON the corridor), so it
+    # is near the box centre rather than on it.
+    assert px == pytest.approx(1884, abs=15) and py == pytest.approx(1238, abs=15)
 
 
 def test_the_answer_is_a_fraction_of_the_client_rect(frame, tutorial):
@@ -641,7 +644,7 @@ def test_the_splitting_pass_cannot_MERGE_anything(minzoom_frame):
     from bridge import mappanel as mp
     original = mp._split
     try:
-        mp._split = lambda lum, a, b, c, d, x0, y0: [
+        mp._split = lambda lum, a, b, c, d, x0, y0, ink=None: [
             mp.Box(a + x0, b + x0, c + y0, d + y0)]
         before = mp.find_boxes(minzoom_frame)
     finally:
@@ -651,3 +654,150 @@ def test_the_splitting_pass_cannot_MERGE_anything(minzoom_frame):
     for box in after:
         assert any(o.x0 <= box.x0 and box.x1 <= o.x1
                    and o.y0 <= box.y0 and box.y1 <= o.y1 for o in before), box
+
+def test_a_DIM_palette_still_fits():
+    """A Cove map drawn with cell fill at 20-40 luminance: at INK 40 the
+    rooms come out half-height, a corridor shreds into 4 px slabs and nothing
+    fits. `locate` retries at INK_DIM, and the party's own room resolves onto
+    the torch icon it is drawn under (client ~855, 587)."""
+    from PIL import Image
+    from bridge.dungeon_map import read_dungeon_map
+
+    img = np.asarray(Image.open(CAPTURES / "map_dim_cove.png").convert("RGB"))
+    dungeon = read_dungeon_map(str(CAPTURES / "map_dim_cove.map.json"))
+    assert mappanel.fit(mappanel.find_boxes(img), mappanel.tiles_of(dungeon),
+                        mappanel.kinds_of(dungeon)) is None
+    point, why = mappanel.locate(img, dungeon, "rooL")
+    assert point is not None, why
+    assert abs(point[0] * 1280 - 855) < 8 and abs(point[1] * 720 - 587) < 8
+
+
+
+def test_a_SPARSE_entrance_map_is_anchored_on_the_party_token():
+    """Live 2026-09-25, a Ruins entrance: three rooms drawn, and the vote put
+    the whole map 14 x 7 units off -- rooL, the party's own room, predicted at
+    (1003, 660) with the token at (856, 587) -- so rooH, straight up, read as
+    "not drawn" and the party sat in its first room for two iterations.
+    Anchored on the token (the save says the party is in rooL) the same frame
+    resolves rooH onto the clipped box above and rooK onto the room left."""
+    from PIL import Image
+    from bridge.dungeon_map import read_dungeon_map
+
+    img = np.asarray(Image.open(CAPTURES / "map_anchor_entrance.png").convert("RGB"))
+    dungeon = read_dungeon_map(str(CAPTURES / "map_anchor_entrance.map.json"))
+    tok = mappanel.party_token(img)
+    assert tok is not None and abs(tok[0] - 856) < 4 and abs(tok[1] - 586) < 4
+    # the old reading: the fit is confidently wrong and rooH is "not drawn"
+    assert mappanel.locate(img, dungeon, "rooH")[0] is None
+    point, why = mappanel.locate(img, dungeon, "rooH", here="rooL")
+    assert point is not None, why
+    assert abs(point[0] * 1280 - 856) < 8 and abs(point[1] * 720 - 513) < 8
+    point, why = mappanel.locate(img, dungeon, "rooK", here="rooL")
+    assert point is not None and abs(point[0] * 1280 - 787) < 8, why
+
+
+def test_an_unanchored_fit_that_misplaces_the_party_is_refused():
+    """When the anchored fit cannot be made, the fallback must still put the
+    party's room on the token -- otherwise it is clicking into a map it has
+    placed wrong."""
+    from bridge.dungeon_map import read_dungeon_map
+    from PIL import Image
+    img = np.asarray(Image.open(CAPTURES / "map_anchor_entrance.png").convert("RGB"))
+    dungeon = read_dungeon_map(str(CAPTURES / "map_anchor_entrance.map.json"))
+    # Force the anchored fit to fail and the vote to run.
+    orig = mappanel.fit
+    try:
+        mappanel.fit = (lambda b, t, k=None, anchor=None, scale_hint=None:
+                        None if anchor is not None else orig(b, t, k))
+        point, why = mappanel.locate(img, dungeon, "rooB", here="rooL")
+    finally:
+        mappanel.fit = orig
+    assert point is None and "party token" in why, why
+
+
+def test_a_red_room_icon_is_not_the_party_token():
+    """Live 2026-09-26: a red fight-room icon was read as the party's torch
+    token, so the party-on-token check refused a CORRECT fit and the loop
+    stood in a crypts entrance for three iterations. The torch is orange
+    (green/red ~0.47), the icon red (~0.21)."""
+    from PIL import Image
+    from bridge.dungeon_map import read_dungeon_map
+
+    img = np.asarray(Image.open(CAPTURES / "map_red_icon.png").convert("RGB"))
+    dungeon = read_dungeon_map(str(CAPTURES / "map_red_icon.map.json"))
+    tok = mappanel.party_token(img)
+    assert tok is not None and abs(tok[0] - 855) < 6 and abs(tok[1] - 585) < 6
+    point, why = mappanel.locate(img, dungeon, "rooB", here="rooA")
+    assert point is not None, why
+    assert abs(point[0] * 1280 - 929) < 8 and abs(point[1] * 720 - 584) < 8
+
+
+def test_a_gold_treasure_icon_is_not_the_party_token():
+    """Live 2026-09-26, the second decoy: a treasure room's gold icon is orange
+    enough to pass the colour gate, and the densest-cluster rule picked it
+    over the torch. The panel opens centred on the party, so the cluster
+    nearest that home point is the token."""
+    from PIL import Image
+    from bridge.dungeon_map import read_dungeon_map
+
+    img = np.asarray(Image.open(CAPTURES / "map_gold_icon.png").convert("RGB"))
+    dungeon = read_dungeon_map(str(CAPTURES / "map_gold_icon.map.json"))
+    tok = mappanel.party_token(img)
+    assert tok is not None and abs(tok[0] - 856) < 6 and abs(tok[1] - 586) < 6
+    point, why = mappanel.locate(img, dungeon, "rooJ", here="rooJ")
+    assert point is not None, why
+
+
+def test_a_room_clipped_by_the_panel_edge_is_clicked_where_it_shows(monkeypatch):
+    """Live 2026-09-27 (Cove): rooI predicted at y 696, the panel ending at 695
+    and the top of the room drawn above it; "not drawn" on every poll."""
+    import numpy as np
+    from types import SimpleNamespace
+    from bridge import mappanel as mp
+    img = np.zeros((720, 1280, 3), np.uint8)
+    x0, x1, y0, y1 = mp.panel_rect(1280, 720)
+    here = mp.Box(840, 874, 570, 604)                   # a full room
+    clipped = mp.Box(840, 874, 680, y1)                 # its bottom cut off
+    fake = SimpleNamespace(scale=14.0, point=lambda _t: (857.0, 696.0),
+                           line=lambda: "fake fit")
+    monkeypatch.setattr(mp, "find_boxes", lambda *a, **k: [here, clipped])
+    monkeypatch.setattr(mp, "area_point", lambda d, a: (0.0, 0.0))
+    monkeypatch.setattr(mp, "fit", lambda *a, **k: fake)
+    monkeypatch.setattr(mp, "tiles_of", lambda d: [])
+    monkeypatch.setattr(mp, "kinds_of", lambda d: [])
+    point, why = mp.locate(img, object(), "rooI")
+    assert point is not None, why
+    assert abs(point[0] * 1280 - 857) < 2 and y0 < point[1] * 720 <= y1
+    # ...and a prediction far off the panel is still refused.
+    fake2 = SimpleNamespace(scale=14.0, point=lambda _t: (857.0, 760.0),
+                            line=lambda: "fake fit")
+    monkeypatch.setattr(mp, "fit", lambda *a, **k: fake2)
+    assert mp.locate(img, object(), "rooI")[0] is None
+
+
+def test_a_room_clipped_by_the_TOP_edge_is_found_in_the_grid_strip():
+    """Live 2026-09-28: rooC predicted at y 499 while the panel region starts
+    at 510 and the grid is drawn from 491; the raid stalled in rooH. The top
+    strip holds rooC's box, split by its icon."""
+    from PIL import Image
+    from bridge.dungeon_map import read_dungeon_map
+
+    img = np.asarray(Image.open(CAPTURES / "map_top_clipped.png").convert("RGB"))
+    dungeon = read_dungeon_map(str(CAPTURES / "map_top_clipped.map.json"))
+    point, why = mappanel.locate(img, dungeon, "rooC", here="rooH")
+    assert point is not None, why
+    assert "top edge" in why
+    assert abs(point[0] * 1280 - 877) < 10 and point[1] * 720 < 510
+
+
+def test_a_room_merged_with_its_corridor_is_clicked_on_the_room():
+    """Live 2026-09-28: rooI and coFI came out as one tall box whose centre is
+    on the corridor, and the raid stalled in rooF clicking it."""
+    from PIL import Image
+    from bridge.dungeon_map import read_dungeon_map
+
+    img = np.asarray(Image.open(CAPTURES / "map_rooF_offered_miss.png").convert("RGB"))
+    dungeon = read_dungeon_map(str(CAPTURES / "map_rooF_offered_miss.map.json"))
+    point, why = mappanel.locate(img, dungeon, "rooI", here="rooF")
+    assert point is not None, why
+    assert abs(point[0] * 1280 - 857) < 6 and abs(point[1] * 720 - 656) < 6

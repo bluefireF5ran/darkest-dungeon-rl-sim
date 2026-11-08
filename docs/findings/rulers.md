@@ -6,6 +6,70 @@ it. **None of them may ever become a training target** -- see
 2026-09-07.
 
 
+### PLAYBOOK compliance, measured on the shipped 1836 checkpoint (2026-09-20)
+
+```bash
+python tools/check_playbook.py --model models/dd_combat_ppo_full_expedition.zip     --episodes 24 --comps 10 --comp-seed 1
+```
+
+2,469 hero turns, 229 combats. The first reading of this ruler against the
+world the 1836 checkpoint trained in, so the numbers are a baseline rather
+than a delta -- four world changes separate it from every earlier run.
+
+| rule | reading | verdict |
+|---|---|---|
+| **3.2** heal only at Death's Door / critical HP / stall | **35.5%** of 299 heals are NONE of those -- 106 turns, **4.3% of all hero turns** | the biggest single gap |
+| **3.3** IN A STALL, kill secured | 50.0% attack, **44.6%** recover; the expert says most of them | second, and smaller than first reported |
+| **CRP** attack a corpse | 5.9% of the turns it was possible; of those **23.1%** had a living enemy in the same skill's reach that would have died to the hit | 12 turns, 0.5% |
+| **DOT** pile onto a doomed enemy | 45.8% against an indifferent 56.3% | **working** -- the policy avoids them |
+| **3.5** buffs need long fights | median combat **2 rounds**, only 8.7% last >3 | buffs rarely pay here |
+
+**The 3.2 number is a POLICY gap, not a reward gap, and the tool says which.**
+Realized step reward on those turns: unjustified heal **-0.0820**, justified
+heal **+0.1021**. The reward tells them apart by 0.18 and the policy plays the
+negative one 106 times, so "the reward cannot express it" is ruled out and no
+reward knob is indicated. What is left is training, or the decision layer.
+
+**Masking a full-HP heal target was considered and rejected**: 10.4% of the
+unjustified heals land on a hero above 95% HP, which looks like pure waste
+until you remember DD heals carry bleed and blight cures, stress relief and
+buffs. A mask cannot see the secondary effect, so it would forbid correct
+play -- and it would change the action distribution, which makes the shipped
+checkpoint incomparable (`tests/suite/test_obs_width_tripwire.py`'s sibling
+problem).
+
+**3.3's number was wrong when first reported, and the ruler was the reason.**
+The criterion opens *"**En stall**, si X está aturdido y va a morir a manos de
+Y o Z"* -- the stall is part of it. `check_playbook` gated only on
+`_party_needs_recovery()`, which is one of the three tests in
+`is_recovery_phase()`; the enemy count and `_stall_is_still_cheap()` were
+missing. So it counted turns where the party was NOT stalling, and outside a
+stall attacking is correct play, because the point is to end the fight. Fran
+caught it: *"the recover part only matters when you are stalling properly per
+se, not whenever every enemy is stunned."*
+
+Gated properly, the situation shrinks from 75 turns to 56 -- **19 correct
+attacks had been scored as violations** -- and recovery reads **44.6%**
+against the 37.3% first reported. **Figures from before 2026-09-20 are not
+comparable**: what changed is the situation being counted, not the policy.
+
+`all_stunned` is still a proxy for "X is stunned and will die to Y or Z", and
+a reasonable one inside a stall, where `STALL_PHASE_MAX_ENEMIES` usually
+leaves a single enemy. That half is unverified and the correction did not
+touch it.
+
+**3.2 is SHIPPED as of the same day**: Fran chose the bridge-side shortlist
+filter, and `Advisor._apply_playbook_32` demotes an unjustified heal below
+every compliant move. On the capture corpus it changes **3 of 56 combat
+decisions**, and agreement with the recorded play moves 30 -> 29 MATCH --
+which is not evidence either way, because that corpus is plumbing-test play
+and **MATCH is agreement, not correctness**. See `docs/changelog/2026-09.md`.
+`--no-playbook-heals` restores the unfiltered arm.
+
+**3.3 and CRP stay open.** 3.3 is the same shape and would want the same
+ruling; CRP is 12 turns (0.5%) and strictly worse play, so it is cheap and
+uncontroversial but small.
+
 ### The expert's tier list is a RULER, and it says the policy chooses badly (2026-08-28)
 
 Fran supplied a skill tier list transcribed from a 9,000-hour player, plus the

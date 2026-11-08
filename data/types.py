@@ -652,6 +652,11 @@ class EnemyDefinition:
     # flag, which is the whole design: you break the pot your friend is in, not
     # the empty one.
     can_be_damaged_directly: bool = True
+    # `loot: .code "T" .count 2` -- how many draws of `loot_code` the
+    # monster pays on death. The Necromancer draws twice; most monsters
+    # ship no `.count` and draw once. Read by the campaign simulator
+    # (campaign/loot.py) to price a battle; nothing in combat reads it.
+    loot_count: int = 1
     can_surprise: bool = True
     can_be_surprised: bool = True
     always_surprise: bool = False
@@ -1273,6 +1278,30 @@ class CombatRules:
     # between fights" -- which this simulator used to answer with an invented
     # per-combat rate instead. See EAT_MAX_MEALS_PER_STOP.
     max_provisions_before_full: int = 4
+    # What a quest does to quirks, rolled per surviving hero as it comes
+    # home (`Inventory::System` ctor in the binary, which reads these and
+    # nothing else for it): one NEGATIVE and one POSITIVE roll, each chance
+    # interpolated on the hero's stress 0 -> 100 between the `*Stress0*` and
+    # `*Stress100*` value of the quest's outcome. Then, from resolve
+    # `disease_after_quest_min_resolve_level` on, a disease roll at
+    # `disease_max_chance - disease_resist * disease_hero_disease_resist_weight`,
+    # floored at `disease_after_quest_min_chance`. Defaults are the shipped
+    # base rules.json. Read by `campaign/quirks.py`.
+    neg_stress0_success: float = 0.30
+    pos_stress0_success: float = 0.50
+    neg_stress100_success: float = 0.50
+    pos_stress100_success: float = 0.40
+    neg_stress0_failure: float = 0.40
+    pos_stress0_failure: float = 0.40
+    neg_stress100_failure: float = 0.70
+    pos_stress100_failure: float = 0.25
+    disease_after_quest_min_resolve_level: float = 2
+    disease_after_quest_min_chance: float = 0.05
+    disease_max_chance: float = 0.32
+    disease_hero_disease_resist_weight: float = 0.33
+    quirks_max_positive: float = 5
+    quirks_max_negative: float = 5
+    quirks_max_diseases: float = 3
     # Read by bridge/retreat.py, not by the engine — retreating from a combat is
     # not in the action space (ASSUMPTIONS.md). `combat_retreat_stress` is the
     # 20 points PLAYBOOK 2.6 pays to pull out, and the chance pair says the

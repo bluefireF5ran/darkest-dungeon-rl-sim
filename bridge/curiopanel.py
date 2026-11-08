@@ -98,6 +98,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # One slot to the next, as a fraction of the client width. Measured on two
 # frames at two resolutions (see the module docstring); they agree to 1 part in
 # 4000, which is far tighter than anything fitted here usually manages.
+#: The fallback x gap (px) for `_red_blocks` when the default merges the X.
+TIGHT_GAP_PX = 4
 SLOT_PITCH_FRAC = 0.05782
 
 # The hand relative to the red X, as fractions of the client area. Superseded
@@ -236,7 +238,8 @@ class CurioButtons:
                 f"X ({self.close[0]:.4f}, {self.close[1]:.4f})")
 
 
-def _red_blocks(img: np.ndarray) -> list[tuple[float, float, int, int, float]]:
+def _red_blocks(img: np.ndarray, gap: int = 20
+                ) -> list[tuple[float, float, int, int, float]]:
     """`(cx, cy, width, count, aspect)` per red cluster, right half only."""
     h, w, _ = img.shape
     a = img.astype(np.int16)
@@ -251,7 +254,7 @@ def _red_blocks(img: np.ndarray) -> list[tuple[float, float, int, int, float]]:
     xs, ys = xs[order], ys[order]
     out, start = [], 0
     for i in range(1, xs.size + 1):
-        if i == xs.size or xs[i] - xs[i - 1] > 20:
+        if i == xs.size or xs[i] - xs[i - 1] > gap:
             out.extend(_split_by_row(xs[start:i], ys[start:i]))
             start = i
     return out
@@ -362,11 +365,20 @@ def find(img: np.ndarray) -> Optional[CurioButtons]:
 
     lo, hi = BUTTON_MIN_FRAC * w, BUTTON_MAX_FRAC * w
     min_px = MIN_PX_AT_720P * (w * h) / (1280 * 720)
-    buttons = [blk for blk in _red_blocks(img)
-               if lo <= blk[2] <= hi
-               and ASPECT_MIN <= blk[4] <= ASPECT_MAX
-               and blk[3] >= min_px
-               and not _in_map_panel(blk[0], blk[1], w, h)]
+    def _buttons(gap):
+        return [blk for blk in _red_blocks(img, gap)
+                if lo <= blk[2] <= hi
+                and ASPECT_MIN <= blk[4] <= ASPECT_MAX
+                and blk[3] >= min_px
+                and not _in_map_panel(blk[0], blk[1], w, h)]
+    buttons = _buttons(20)
+    if not buttons:
+        # **A tighter x gap when the X merged with its neighbours.** Live
+        # 2026-09-27: a Rubble panel's X (133 red px at 974,310) shared its
+        # rows with red rubble and joined a 347-px-wide cluster that the size
+        # filter threw out; the party pressed W at the panel for a whole
+        # iteration. Tried only after the usual clustering finds nothing.
+        buttons = _buttons(TIGHT_GAP_PX)
     if not buttons:
         return None
     # The rightmost button-sized red thing. The panel is right-anchored, and a

@@ -56,6 +56,7 @@ mid-fight.
 from __future__ import annotations
 
 import ctypes
+import math
 import sys
 import time
 from ctypes import wintypes as wt
@@ -73,14 +74,15 @@ from bridge.overlay_slots import MOVE_SLOT, PASS_SLOT, RETREAT_SLOT
 from .actuation.keys import (  # noqa: F401
     ACK_TIMEOUT, BAR_SETTLE_FOR, BAR_SETTLE_STEP, BLIND_CANDIDATES,
     CURIO_APPROACH_SHOT, CURIO_NUDGE_HOLD, CURIO_PANEL_READS, CURIO_SHOT,
-    CURIO_TRIES, DOOR_TRIES, DOOR_WAIT, DOOR_WAITS, DRAG_DWELL, DRAG_STEPS,
+    CURIO_TRIES, DOOR_BACKOFF, DOOR_TRIES, DOOR_WAIT, DOOR_WAITS, DRAG_DWELL, DRAG_STEPS,
     DRAG_STEP_GAP, FOCUS_WAIT, INPUT, INPUT_KEYBOARD, INPUT_MOUSE,
     INVENTORY_SLOTS, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE,
     KEY_HOLD, MAPVK_VK_TO_VSC, MAP_CANDIDATES, MAP_POINT_TOLERANCE,
     MAP_REFIT_STEP, MAP_REFIT_TRIES, MAP_RESET_STEP, MAP_RESET_WATCH,
     MAP_SHOT, MAX_DEFERRALS, MAX_FREE_ACTIONS, MAX_WALK_STEPS, MK_LBUTTON,
     MK_SHIFT, MOD_DWELL, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN,
-    MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_VIRTUALDESK,
+    MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN,
+    MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK,
     MOUSEEVENTF_WHEEL, MOUSEINPUT, MOVE_CORRECTIONS, PACK_SETTLE,
     PANEL_WAIT, PARTY_CELL_WARM, ROOM_CURIO_TRIES, SEND_ATTEMPTS,
     SEND_SHOT, SETTLE, SETTLE_BEFORE_SEND, SKILL_VKS, SM_CXVIRTUALSCREEN,
@@ -89,7 +91,8 @@ from .actuation.keys import (  # noqa: F401
     TOOLTIP_SAMPLE_FOR, TOOLTIP_SAMPLE_STEP, TOOLTIP_SETTLE,
     TORCH_CLICK_GAP, TORCH_CONFIRM_READS, TORCH_MAX_CLICKS, TORCH_STEP,
     TURN_ACK_TIMEOUT, VK_1, VK_2, VK_3, VK_4, VK_5, VK_A, VK_CONTROL, VK_D,
-    VK_ESCAPE, VK_KILL, VK_RETURN, VK_SHIFT, VK_SPACE, VK_T, VK_TAB, VK_W,
+    VK_ESCAPE, VK_KILL, VK_LCONTROL, VK_LSHIFT, VK_RETURN, VK_SHIFT,
+    VK_SPACE, VK_T, VK_TAB, VK_W,
     WALK_HOLD, WALK_STALL_LIMIT, WHEEL_DELTA, WM_KEYDOWN, WM_KEYUP,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, _INPUTunion, _POINT,
     _UNREAD, _cursor_pos, _err, _norm_axis, _virtual_desktop, kernel32,
@@ -211,7 +214,24 @@ def torch_targets(resolved) -> tuple:
 
 
 def plan_snuff_torch(resolved, point=None, label: str = "") -> InputPlan:
-    """SHIFT+CTRL+click the torch meter: put the light out.
+    """CTRL+SHIFT+click the torch dial: the FULL snuff, in one click.
+
+    **MEASURED LIVE 2026-09-21 against DD's own light tooltip**, at the dial
+    (the round number at the centre of the light bar), holding the modifiers
+    `MOD_DWELL` before the click:
+
+        plain +25   |   SHIFT -25   |   CTRL+SHIFT -100, `BLACK AS PITCH (0)`
+
+    An earlier reading in the same session said CTRL+SHIFT was worth only -25
+    and is RETRACTED: it was taken at a 0.12s dwell, where CTRL never reached
+    SDL and the gesture degraded into the SHIFT one. The table above is the
+    one taken at 0.35s, and it matches what Fran reported by hand.
+
+    **The degraded forms are not weaker, they are OPPOSITE.** At the short
+    dwell, SHIFT+click read as a plain click and RAISED the light 25 a time --
+    a torch spent per click, in the middle of the fight the snuff exists to
+    darken. That is the bug Fran caught live: *"the model didn't snuff torch,
+    in fact, it increased torch before killing the last enemy just now"*.
 
     Fran, on the tutorial: snuffing the torch at the moment the killing blow
     lands gets much better loot. The game documents the gesture --
@@ -234,13 +254,23 @@ def plan_snuff_torch(resolved, point=None, label: str = "") -> InputPlan:
                                                  None)
     if pt is None:
         return refuse("no calibrated torch meter", "torch")
-    return InputPlan((Step("click", screen=pt, mods=(VK_SHIFT, VK_CONTROL),
+    return InputPlan((Step("click", screen=pt,
+                           mods=(VK_LSHIFT, VK_LCONTROL),
                            label="snuff the torch"),),
                      "torch", "snuff the torch before the killing blow")
 
 
 def plan_reduce_torch(resolved, clicks: int = 1, point=None) -> InputPlan:
-    """SHIFT+click the torch meter: one 25-point step down, per click.
+    """SHIFT+click the torch dial, `clicks` times: 25 points down each.
+
+    **It is the partial gesture, and `plan_snuff_torch` is the whole one** --
+    CTRL+SHIFT takes the light to 0 in a single click, measured 2026-09-21.
+    This stays for the case where a partial reduction is what is wanted.
+
+    **The dwell is load-bearing.** At `MOD_DWELL` 0.12s this click read as an
+    UNMODIFIED one and raised the light by 25 instead of lowering it, which is
+    how a raid came to burn torches mid-fight. The constant is 0.35s now and
+    the evidence is on it.
 
     The game documents both gestures on the same widget --
     `str_snuff_torch_tip` is SHIFT+CTRL+CLICK for a full snuff and
@@ -263,7 +293,7 @@ def plan_reduce_torch(resolved, clicks: int = 1, point=None) -> InputPlan:
         return refuse("no calibrated torch meter", "torch")
     if not isinstance(clicks, int) or isinstance(clicks, bool) or clicks <= 0:
         return refuse("nothing to reduce", "torch")
-    steps = tuple(Step("click", screen=pt, mods=(VK_SHIFT,),
+    steps = tuple(Step("click", screen=pt, mods=(VK_LSHIFT,),
                        label=f"reduce the torch ({i + 1}/{clicks})",
                        after=TORCH_CLICK_GAP) for i in range(clicks))
     return InputPlan(steps, "torch", f"reduce the torch {clicks} step(s)")
@@ -306,6 +336,72 @@ def plan_retreat(resolved) -> InputPlan:
               after=RETREAT_SETTLE),
          Step("click", screen=ok, label="confirm the retreat")),
         "battle", "retreat from this combat")
+
+
+def plan_abandon_quest(resolved) -> InputPlan:
+    """RETREAT from a raid whose objective is NOT met: the X, top left.
+
+    **This is a different widget from `plan_leave_raid`'s seal, and which one
+    works depends on whether the objective is met.** Measured 2026-09-21 with
+    the quest COMPLETE: the scroll moved nothing over a six-second watch and
+    the seal above it reached `raid_results` in two. Fran, on the retreat
+    case: *"for retreat you need to click the X button on the top left"*.
+    They sit 40 px apart -- the seal centres at (52, 50) in client pixels and
+    the X banner under it at (52, 92) -- and they are not interchangeable.
+
+    Unlike the seal this raises DD's own "Are you sure you want to retreat?"
+    dialog, which `ActRunner._leave_raid` answers when it sees one. It is
+    still ONE click here: the confirm is a response to a dialog appearing,
+    never part of the plan.
+    """
+    x = getattr(resolved, "raid_abandon_quest", None)
+    if x is None:
+        return refuse("no calibrated abandon-quest banner", "raid")
+    return InputPlan(
+        (Step("click", screen=x, label="the abandon-quest X"),),
+        "raid", "retreat - the survival layer priced pushing on as worse")
+
+
+def plan_leave_raid(resolved) -> InputPlan:
+    """Leave a raid from the HUD, with no quest-complete banner needed.
+
+    **The control is the red WAX SEAL, not the scroll under it**, and getting
+    that wrong cost a live raid. Fran: *"if you continue you can simply click
+    the top left banner icon to end the raid at any time outside of combat"*
+    -- and then, watching this click the scroll and achieve nothing, *"do not
+    click the scroll, click the red symbol"*.
+
+    Measured live 2026-09-21 with the quest complete: a click on
+    `RAID_ABANDON_QUEST` (the scroll) moved nothing over a six-second watch;
+    a click on `RAID_QUEST_SEAL` (the seal above it) reached `raid_results`
+    within two seconds. They are 40 px apart and they are different widgets.
+
+    **And it takes no confirm.** The results page comes straight up, so this
+    sends ONE click. `plan_retreat`'s two-step shape does not apply here:
+    that one is the in-combat retreat, which really does raise "Are you
+    sure?". `ActRunner._leave_raid` still answers a modal if one appears,
+    rather than assuming either way.
+
+    **With the objective already met this banks the quest**, which is why the
+    only caller is the raid-end branch -- out of combat, and only once
+    `RoutePlan.targets` is empty. Sent with the objective unmet it would throw
+    the expedition away, so the gate is the caller's and it is not optional.
+    """
+    seal = getattr(resolved, "raid_quest_seal", None)
+    if seal is None:
+        return refuse("no calibrated quest seal", "raid")
+    return InputPlan(
+        (Step("click", screen=seal, label="the quest banner's red seal"),),
+        "raid", "leave the raid - the objective is met")
+
+
+class _PassAdvice:
+    """The minimum `plan_one_move` reads to plan a PASS."""
+    skill_slot = PASS_SLOT
+    side = ""
+    rank = -1
+    headline = "pass the turn"
+    continues_turn = False
 
 
 def plan_battle(update, resolved, bar=None) -> InputPlan:
@@ -652,13 +748,35 @@ def plan_open_building(name: str, resolved) -> InputPlan:
     from bridge import townlayout
 
     pt = resolved.at(townlayout.building_scene_point(name))
-    if pt is None:
+    if pt is not None:
+        return InputPlan((Step("click", screen=pt, label=f"open the {name}",
+                               after=TOWN_PANEL_SETTLE),),
+                         "town", f"open the {name}")
+
+    # **NO SCENE POINT IS NOT A DEAD END: OPEN THE ONE WE HAVE, THEN HOP.**
+    # The strip is not drawn on the Hamlet, so it cannot open the FIRST
+    # building -- but once any panel is up it opens every other one, and the
+    # stage coach's scene point has been measured since 2026-08-31. Two
+    # clicks reach a building nobody has measured in the scene.
+    #
+    # This is what the Guild needed. Its skill unlocks were being planned and
+    # BUDGETED and then skipped with "the guild's scene point has never been
+    # measured", so the party embarked carrying a comp whose skills it had
+    # never been given -- Fran: *"the former comp didnt truly use the
+    # potential of the comp"*. Verified live 2026-09-21: coach, then the
+    # strip, and the Guild panel came up.
+    strip = resolved.at(townlayout.building_button(name))
+    first = resolved.at(townlayout.building_scene_point("stage_coach"))
+    if strip is None or first is None:
         known = ", ".join(sorted(townlayout.BUILDING_SCENE_POINTS)) or "none"
-        return refuse(f"no measured scene point for {name!r} "
-                      f"(measured so far: {known})", "town")
-    return InputPlan((Step("click", screen=pt, label=f"open the {name}",
-                           after=TOWN_PANEL_SETTLE),),
-                     "town", f"open the {name}")
+        return refuse(f"no measured scene point for {name!r} and no strip "
+                      f"button to hop with (scene points: {known})", "town")
+    return InputPlan(
+        (Step("click", screen=first, label="open the stage coach",
+              after=TOWN_PANEL_SETTLE),
+         Step("click", screen=strip, label=f"hop to the {name}",
+              after=TOWN_PANEL_SETTLE)),
+        "town", f"open the {name} (via the coach, then the strip)")
 
 
 def plan_close_building(resolved) -> InputPlan:
@@ -865,6 +983,24 @@ def plan_buy_provision(item: str, count: int, resolved,
 # compose the point and then refuse, so the geometry is ready for the frame
 # that settles it and nothing is clicked before then.
 
+def plan_buy_gear(row: int, index: int, resolved) -> InputPlan:
+    """Buy one weapon (`row` 0) or armour (1) rank at the Blacksmith.
+
+    `index` is the rank code bought, 0 being the first upgrade. Refused until
+    `townlayout.BLACKSMITH_MEASURED`."""
+    from bridge import townlayout
+
+    if not townlayout.BLACKSMITH_MEASURED:
+        return refuse("the blacksmith's rank buttons are not measured", "town")
+    pt = resolved.at(townlayout.blacksmith_node(row, index))
+    if pt is None:
+        return refuse(f"no blacksmith row {row} rank {index}", "town")
+    label = "weapon" if row == 0 else "armour"
+    return InputPlan((Step("click", screen=pt,
+                           label=f"buy {label} rank {index}"),),
+                     "town", f"buy blacksmith row {row} rank {index}")
+
+
 def plan_buy_skill(skill_row: int, resolved, rank: int = 1) -> InputPlan:
     """Unlock (or upgrade) one combat skill in the Guild.
 
@@ -1035,8 +1171,24 @@ def plan_room(advice, state, area: str = "") -> InputPlan:
     # Torch first: relighting before walking is what the torch layer means,
     # and `T` needs no coordinates.
     if getattr(advice, "torch", "") == "relight":
-        return InputPlan((Step("key", vk=VK_T, label="use a torch"),),
-                         "torch", "relight before moving on")
+        # **ONE `T` IS 25 LIGHT, AND THE FLOOR IS 76.** This sent exactly one
+        # press whatever the level was, so a party that had just snuffed to 0
+        # walked into the next fight at 25 -- the log saying a relight had
+        # been sent, the game agreeing, and the hard torch floor every other
+        # layer is built on quietly broken. Fran, 2026-09-20: *"try to never
+        # combat on under 75 torch, it started a combat at 0 torch"*.
+        #
+        # `RoomAdvice.torch_count` is what the decision layer worked out, and
+        # it is already capped by the pack. One is the floor rather than the
+        # default, so an advice built by an older caller that has no count
+        # behaves exactly as it did.
+        count = max(1, int(getattr(advice, "torch_count", 0) or 1))
+        steps = tuple(Step("key", vk=VK_T, label=f"use a torch ({i + 1}/{count})",
+                           after=TORCH_CLICK_GAP)
+                      for i in range(count))
+        return InputPlan(steps, "torch",
+                         f"relight before moving on ({count} torch(es), "
+                         f"{TORCH_STEP:.0f} light each)")
     if getattr(advice, "torch", "") == "shutdown":
         # Unreachable in practice, and kept as a guard rather than a plan.
         # `run.py` calls the torch layer with `about_to_win=state.in_battle`,
@@ -1130,6 +1282,35 @@ def plan_room(advice, state, area: str = "") -> InputPlan:
 
 # ── backends ──
 
+#: How long a room relight waits for the save before carrying on. The save
+#: writes torchlight per TURN, so outside a fight the answer rarely comes.
+TORCH_ACK_TIMEOUT = 2.0
+
+#: How long `_curio_landed` keeps re-reading the save for an answer.
+CURIO_ACK_S = 2.5
+
+
+def pack_grew(before, after) -> str:
+    """What the pack gained, by item QUANTITY, or "" for nothing.
+
+    A slot count misses loot that merges into a stack already carried --
+    gold, above all -- which is most of what a loot curio gives.
+    """
+    if before is None or after is None:
+        return ""
+    def totals(pack):
+        out: dict = {}
+        for slot in pack:
+            key = getattr(slot, "key", slot)
+            out[key] = out.get(key, 0) + int(getattr(slot, "amount", 1) or 0)
+        return out
+    was, now = totals(before), totals(after)
+    gained = [f"{(k[1] or k[0]) if isinstance(k, tuple) else k} +{n - was.get(k, 0)}"
+              for k, n in now.items()
+              if n > was.get(k, 0)]
+    return ", ".join(gained)
+
+
 class Backend:
     """`mods` are virtual keys held DOWN across the click and released after.
 
@@ -1158,6 +1339,17 @@ class Backend:
 
     def click(self, screen: tuple[int, int], mods: tuple[int, ...] = ()) -> bool:
         raise NotImplementedError
+
+    def right_click(self, screen: tuple[int, int],
+                    mods: tuple[int, ...] = ()) -> bool:
+        """The right button. See `MOUSEEVENTF_RIGHTDOWN` for why it exists.
+
+        Default is a refusal rather than a left click: a backend that cannot
+        send this must not silently send the other button, because the two
+        mean different things to this game and the wrong one on an inventory
+        item is a discard or a nothing, never the intended use.
+        """
+        return False
 
     def move(self, screen: tuple[int, int]) -> bool:
         """Move the pointer WITHOUT pressing anything.
@@ -1196,6 +1388,11 @@ class DryRunBackend(Backend):
 
     def click(self, screen: tuple[int, int], mods: tuple[int, ...] = ()) -> bool:
         self.sent.append(Step("click", screen=screen, mods=tuple(mods)))
+        return True
+
+    def right_click(self, screen: tuple[int, int],
+                    mods: tuple[int, ...] = ()) -> bool:
+        self.sent.append(Step("rclick", screen=screen, mods=tuple(mods)))
         return True
 
     def move(self, screen: tuple[int, int]) -> bool:
@@ -1310,6 +1507,35 @@ class SendInputBackend(Backend):
         self.win = win
         self.restore_cursor = restore_cursor
 
+    #: While the game's help card is open, hold every input -- Fran's pause
+    #: switch (2026-09-23). Checked at most this often, so a burst of inputs
+    #: does not pay for a screen grab each.
+    HELP_CHECK_S = 0.5
+
+    def _hold_for_help_card(self) -> None:
+        # Only against a REAL window: tests hand the backend stand-ins, and a
+        # screen grab of a stand-in is not a question worth blocking on.
+        hwnd = getattr(self.win, "hwnd", None)
+        if not isinstance(hwnd, int) or not hwnd or not user32.IsWindow(hwnd):
+            return
+        now = time.time()
+        if now - getattr(self, "_help_checked", 0.0) < self.HELP_CHECK_S:
+            return
+        try:
+            from bridge import screen as screen_mod           # noqa: PLC0415
+            said = False
+            while screen_mod.help_card_is_up(screen_mod.grab(self.win)):
+                if not said:
+                    print("  [act] PAUSED - the help card is open; close it to "
+                          "resume", flush=True)
+                    said = True
+                time.sleep(1.0)
+            if said:
+                print("  [act] resumed - the help card is closed", flush=True)
+        except Exception:                                     # noqa: BLE001
+            pass
+        self._help_checked = time.time()
+
     def key(self, vk: int, hold: float = 0.0) -> bool:
         """Send both the virtual key AND its scan code.
 
@@ -1321,6 +1547,7 @@ class SendInputBackend(Backend):
         both readers; `scancode_only()` is the stricter variant if even this
         is not enough.
         """
+        self._hold_for_help_card()
         scan = user32.MapVirtualKeyW(vk, MAPVK_VK_TO_VSC)
         down = INPUT(type=INPUT_KEYBOARD,
                      u=_INPUTunion(ki=KEYBDINPUT(wVk=vk, wScan=scan)))
@@ -1345,6 +1572,7 @@ class SendInputBackend(Backend):
         is SDL-based and SDL reads scan codes, so a vk-only event can be
         accepted by Windows and ignored by the game.
         """
+        self._hold_for_help_card()
         if not vks:
             return False
         sent = 0
@@ -1495,15 +1723,51 @@ class SendInputBackend(Backend):
         sent WITHOUT re-aiming, so they land wherever the verified move left
         the cursor and cannot reintroduce the error it just removed.
         """
+        return self._press(screen, mods, MOUSEEVENTF_LEFTDOWN,
+                           MOUSEEVENTF_LEFTUP)
+
+    def right_click(self, screen: tuple[int, int],
+                    mods: tuple[int, ...] = ()) -> bool:
+        """The right button, same aiming and the same modifier dwell.
+
+        `[pc]str_help_raid_room_6` -- *"While interacting with an object:
+        [RIGHT-CLICK] an inventory item to apply it to the object."*
+        """
+        return self._press(screen, mods, MOUSEEVENTF_RIGHTDOWN,
+                           MOUSEEVENTF_RIGHTUP)
+
+    def _press(self, screen, mods, down_flag: int, up_flag: int) -> bool:
+        self._hold_for_help_card()
         if not self.move(screen):
             return False
         nx, ny = self._normalise(screen)
         self._mods(mods, down=True)
         try:
             time.sleep(MOD_DWELL if mods else 0.02)
-            ok = self._send_abs(nx, ny, MOUSEEVENTF_LEFTDOWN)
+            # **A MODIFIED CLICK WHOSE MODIFIER DID NOT ARRIVE IS A DIFFERENT
+            # ACTION, NOT A WEAKER ONE.** On the torch widget SHIFT+click
+            # reduces the light and a BARE click USES A TORCH: measured live
+            # 2026-09-21, a snuff sent at torch 82 left it at 100, which is
+            # +25 capped -- the opposite play, a torch burnt, and the loot
+            # bonus on the blow it was meant to sweeten thrown away. Fran
+            # watched it happen: *"the model didn't snuff torch, in fact, it
+            # increased torch before killing the last enemy just now"*.
+            #
+            # `MOD_DWELL` was a blind fix for the same failure and this is the
+            # check it never had. Asking the OS is cheap and decisive: if
+            # SendInput's key-down did not take, GetAsyncKeyState says so.
+            if mods and not self._mods_are_down(mods):
+                self._mods(mods, down=False)
+                self._mods(mods, down=True)
+                time.sleep(MOD_DWELL)
+                if not self._mods_are_down(mods):
+                    print("  [act] the modifier never went down - NOT "
+                          "clicking, because the same click without it is a "
+                          "different action")
+                    return False
+            ok = self._send_abs(nx, ny, down_flag)
             time.sleep(0.03)
-            ok &= self._send_abs(nx, ny, MOUSEEVENTF_LEFTUP)
+            ok &= self._send_abs(nx, ny, up_flag)
             return ok
         finally:
             self._mods(mods, down=False)
@@ -1534,6 +1798,7 @@ class SendInputBackend(Backend):
         sent, it is an ordinary click on that slot -- a wrong action that
         looks like a successful drag in the log.
         """
+        self._hold_for_help_card()
         if tuple(src) == tuple(dst):
             return False
         if not self.move(src):
@@ -1582,6 +1847,7 @@ class SendInputBackend(Backend):
         not have to rediscover `MOUSEEVENTF_WHEEL`. Same reason
         `layout.TORCH_METER` is banked and unwired.
         """
+        self._hold_for_help_card()
         nx, ny = self._normalise(screen)
         flags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK
         move = INPUT(type=INPUT_MOUSE, u=_INPUTunion(
@@ -1600,17 +1866,44 @@ class SendInputBackend(Backend):
             time.sleep(0.05)
         return ok
 
+    @staticmethod
+    def _mods_are_down(mods: tuple[int, ...]) -> bool:
+        """Does Windows agree that every one of `mods` is held right now?
+
+        `GetAsyncKeyState`'s high bit is the live physical-or-injected state,
+        so this reports whether `SendInput`'s key-down actually took. It is
+        the only evidence available here: SDL's view cannot be read from
+        outside the game, and the game's reaction is what we are trying not
+        to have to guess at.
+        """
+        try:
+            return all(user32.GetAsyncKeyState(int(m)) & 0x8000 for m in mods)
+        except Exception:                                   # noqa: BLE001
+            return True          # cannot ask: behave exactly as before
+
     def _mods(self, mods: tuple[int, ...], down: bool) -> None:
         """Hold or release modifier keys, scan code filled in as `key` does.
 
         Released in a `finally`, always: a SHIFT left down after a failed
         discard would make the operator's next click discard something too.
         """
+        # **SCAN CODES, NOT VIRTUAL KEYS -- because CTRL was being lost.**
+        # Fran, having tested the gesture by hand: *"again, ctrl shift click
+        # works to snuff it all, ive just tested it"*. Through `SendInput`
+        # with `wVk` set it did not: the same click measured -25, the SHIFT
+        # reduction, so CTRL never reached SDL while SHIFT did. `ScanCodeBackend`
+        # already existed for exactly this reason -- "the form a raw-input game
+        # is most likely to accept" -- but it only overrode `key()`, so every
+        # modifier in the process was still going out as a virtual key.
+        #
+        # Windows synthesises the vk from the scan code, so the event is
+        # indistinguishable from a real keyboard at the level SDL reads, and
+        # `GetAsyncKeyState` still reports it for `_mods_are_down`.
         for m in (mods if down else tuple(reversed(mods))):
             scan = user32.MapVirtualKeyW(m, MAPVK_VK_TO_VSC)
+            flags = KEYEVENTF_SCANCODE | (0 if down else KEYEVENTF_KEYUP)
             ev = INPUT(type=INPUT_KEYBOARD, u=_INPUTunion(
-                ki=KEYBDINPUT(wVk=m, wScan=scan,
-                              dwFlags=0 if down else KEYEVENTF_KEYUP)))
+                ki=KEYBDINPUT(wVk=0, wScan=scan, dwFlags=flags)))
             user32.SendInput(1, ctypes.byref(ev), ctypes.sizeof(INPUT))
             time.sleep(0.02)
 
@@ -1627,6 +1920,7 @@ class ScanCodeBackend(SendInputBackend):
     name = "scancode"
 
     def key(self, vk: int, hold: float = 0.0) -> bool:
+        self._hold_for_help_card()
         scan = user32.MapVirtualKeyW(vk, MAPVK_VK_TO_VSC)
         flags = KEYEVENTF_SCANCODE
         down = INPUT(type=INPUT_KEYBOARD,
@@ -1697,6 +1991,8 @@ class Actuator:
                 ok = self.backend.key(step.vk, step.hold)
             elif step.kind == "drag":
                 ok = self.backend.drag(step.screen, step.to, step.mods)
+            elif step.kind == "rclick":
+                ok = self.backend.right_click(step.screen, step.mods)
             else:
                 ok = self.backend.click(step.screen, step.mods)
             if not ok:
@@ -1779,18 +2075,33 @@ class ActRunner:
         # plan, and per `(area, curio)` rather than per curio, because the same
         # id appears in several corridors and each is a different object.
         self.gave_up_on: set = set()
+        #: 'no room' modals answered this raid. Read by the raid layer: with
+        #: the objective met, loot the game will not let into the pack is no
+        #: reason to stay (live 2026-09-27: a 30-minute loot chase at 13/16
+        #: that ended on the play timeout, "no room" at every curio).
+        self.pack_full_seen = 0
+        #: `() -> dict`, the raid layer's provision reserve (run.py wires it).
+        self.item_reserve = None
         #: How many free actions this turn has taken, per `turn_key`. See
         #: `MAX_FREE_ACTIONS`.
         self._continued: dict = {}
         #: How many times this turn has been deferred. See `MAX_DEFERRALS`.
         self._deferred: dict = {}
         self.acted: set = set()
+        #: Destinations a map-view reset has already been spent on, so a room
+        #: that genuinely is not on the map costs `MAP_RESET_WATCH` once
+        #: rather than on every poll. Per runner, like `gave_up_on`: the view
+        #: is a property of this session's panel, not of the save.
+        self._view_reset_for: set = set()
         self._was_in_battle = False
         # The order the party embarked in, learned by watching rather than
         # read: the save records the CURRENT formation and nothing records the
         # intended one. Captured the first time a room block arrives with no
         # fight behind it, which is the party as the human arranged it.
         self.marching_order: list = []
+        # A formation reset the Quest Complete banner put off: it swallows the
+        # Default Party order click, so the reset waits for the banner to go.
+        self._formation_due = False
         # Tags already reported by `_say_once`.
         self._said: set = set()
         # Called with (hero guid, skill id) after a send the save confirmed.
@@ -1872,7 +2183,18 @@ class ActRunner:
         # loop is worse than no modal detector.
         try:
             import bridge.screen as screen_mod                # noqa: PLC0415
-            if screen_mod.recognise_live(self.window) != "hunger":
+            # **THE PANEL, NOT THE SCREEN.** `recognise_live` matches the
+            # whole frame, which carries the room art behind this panel -- so
+            # a hunger check in an unbanked room read UNKNOWN and this
+            # returned False, leaving a modal up that swallows every other
+            # input. `hunger_panel_is_up` asks about the widget alone and is
+            # the same answer in every room (measured: 0.000-0.002 against
+            # the banked frames, 0.792 against the nearest thing that is not
+            # hunger). The name is still accepted, so nothing that worked
+            # before stops working.
+            if (screen_mod.recognise_live(self.window) != "hunger"
+                    and not screen_mod.hunger_panel_is_up(
+                        screen_mod.grab(self.window))):
                 return False
         except Exception:                                     # noqa: BLE001
             return False
@@ -1898,7 +2220,8 @@ class ActRunner:
             self.stats["acted"] += 1
             time.sleep(PANEL_WAIT)
             try:
-                still = screen_mod.recognise_live(self.window) == "hunger"
+                still = screen_mod.hunger_panel_is_up(
+                    screen_mod.grab(self.window))
             except Exception:                                 # noqa: BLE001
                 still = False
             if not still:
@@ -1954,6 +2277,165 @@ class ActRunner:
             pass
         return order
 
+    #: Green under a hero while a skill is selected marks a legal target.
+    #: Measured 2026-09-23 in target-select: legal ranks 0.022-0.071, the
+    #: one the game would not take exactly 0.0.
+    TARGET_GREEN_FLOOR = 0.008
+
+    def _legal_hero_ranks(self) -> Optional[set]:
+        """Ranks the game draws as legal targets right now, or None."""
+        import numpy as np                                    # noqa: PLC0415
+        import bridge.screen as screen_mod                    # noqa: PLC0415
+        img = screen_mod.grab(self.window)
+        if img is None:
+            return None
+        a = np.asarray(img).astype(int)
+        h, w = a.shape[:2]
+        y0, y1 = int(440 / 720 * h), int(468 / 720 * h)
+        half = max(10, int(35 / 1280 * w))
+        legal = set()
+        for i in range(4):
+            pt = self.resolved.point("hero", i)
+            if pt is None:
+                return None
+            cx, _cy = self.window.to_client(*pt)
+            box = a[y0:y1, max(0, cx - half):cx + half, :3]
+            if box.size == 0:
+                continue
+            r, g, b = box[..., 0], box[..., 1], box[..., 2]
+            if float(((g > 100) & (g > 1.4 * r) & (g > 1.4 * b)).mean())                     > self.TARGET_GREEN_FLOOR:
+                legal.add(i + 1)
+        return legal or None
+
+    def _retarget_to_a_legal_hero(self, update, plan, bar):
+        """Select the skill, ASK THE SCREEN which heroes it can reach, click.
+
+        Measured 2026-09-23: a Musketeer's heal on the Bounty Hunter, whom
+        the game did not bracket as a target. The click did nothing, the
+        miss was read as "the game is asking another hero", and ten minutes
+        went on heroes it was not asking while her self-heal was legal the
+        whole time. Returns the plan still to send -- just the click once the
+        key has gone out.
+        """
+        steps = tuple(plan.steps)
+        if (not self.armed or plan.screen_witness or len(steps) < 2
+                or steps[-1].kind != "click"
+                or not (steps[-1].label or "").startswith("hero rank ")):
+            return plan
+        try:
+            want = int(steps[-1].label.split()[-1])
+        except ValueError:
+            return plan
+        time.sleep(SETTLE_BEFORE_SEND)
+        if not self.actuator.execute(InputPlan(steps[:-1], plan.layer,
+                                               "select the skill")):
+            return plan
+        # **Nothing bracketed is not "everyone legal".** Live, the second
+        # time: no bracket at all, because the key had TOGGLED OFF a skill
+        # already selected or the read beat the draw. So look again, and
+        # once press the key again, before trusting the original click.
+        legal = None
+        for attempt in range(3):
+            time.sleep(0.4)
+            legal = self._legal_hero_ranks()
+            if legal is not None:
+                break
+            if attempt == 1:
+                self.actuator.execute(InputPlan(steps[-2:-1], plan.layer,
+                                                "select the skill again"))
+        keep = dict(continues_turn=plan.continues_turn,
+                    screen_witness=plan.screen_witness)
+        if legal is None or want in legal:
+            return InputPlan((steps[-1],), plan.layer, plan.why, **keep)
+        slot = getattr(update, "skill_slot", 0)
+        for alt in getattr(update, "alternatives", ()) or ():
+            if getattr(alt, "skill_slot", 0) != slot:
+                continue
+            p = plan_one_move(alt, self.resolved, bar)
+            last = p.steps[-1] if p.actionable and p.steps else None
+            label = (last.label or "") if last is not None else ""
+            if label.startswith("hero rank ") and label.split()[-1].isdigit()                     and int(label.split()[-1]) in legal:
+                self._say(f"  [act] [battle] rank {want} is not a legal "
+                          f"target on screen (legal {sorted(legal)}) - "
+                          f"{label} instead")
+                return InputPlan((last,), plan.layer,
+                                 p.why + " [retargeted]", **keep)
+        rank = min(legal)
+        self._say(f"  [act] [battle] rank {want} is not a legal target on "
+                  f"screen (legal {sorted(legal)}) and no alternative names "
+                  f"one - hero rank {rank}")
+        return InputPlan((Step("click", screen=self.resolved.point("hero",
+                                                                    rank - 1),
+                               label=f"hero rank {rank}"),),
+                         plan.layer, plan.why + " [retargeted]", **keep)
+
+    def _answer_journal(self) -> bool:
+        """Close a curio's journal page if one is up. True when it acted."""
+        import bridge.screen as screen_mod                    # noqa: PLC0415
+        if not screen_mod.journal_page_is_up(screen_mod.grab(self.window)):
+            return False
+        if not (self.armed and self._focused_or_wait()):
+            return False
+        pt = self.resolved.at(screen_mod.JOURNAL_CLOSE)
+        if pt is None:
+            return False
+        self._say("  [act] [event] a journal page is up - closing it")
+        self.actuator.execute(InputPlan(
+            (Step("click", screen=pt, label="close the journal page"),),
+            "event", "close the journal page"))
+        time.sleep(0.8)
+        return True
+
+    def _answer_phantom_fight(self) -> None:
+        """One short step when the save says fight and no enemy is drawn.
+
+        Harmless if the read is wrong: A/D in a real fight moves nobody.
+        """
+        import bridge.screen as screen_mod                    # noqa: PLC0415
+        img = screen_mod.grab(self.window)
+        red = screen_mod.enemy_bars_drawn(img)
+        if red is None or red > 0.0:
+            # **Every hero tried and the fight still on: the marks are what
+            # is stuck.** Measured 2026-09-23: an Abomination's MOVE counted
+            # as played with the bar unchanged, the game sat in MOVE
+            # target-select, and each round-robin skipped him as "already
+            # played this turn" for half an hour. Forgetting the marks lets
+            # the next pass really try every hero again.
+            # **Second time round with nothing moved: PASS.** Whoever the
+            # game is asking, passing their turn moves the fight on -- which
+            # is why this lives here and not in `plan_battle`, where the bar
+            # may belong to a different hero than the save names. Measured
+            # 2026-09-23: an Abomination whose whole shortlist was greyed was
+            # refused on every rotation for half an hour.
+            self._stuck_rotations = getattr(self, "_stuck_rotations", 0) + 1
+            if self._stuck_rotations >= 2 and self.armed:
+                bar = self._read_bar()
+                if bar is not None and bar.waiting and bar.slot_lit(PASS_SLOT):
+                    plan = plan_one_move(_PassAdvice(), self.resolved, bar)
+                    if plan.actionable and self._focused_or_wait():
+                        self._say("  [act] [battle] two full rotations and "
+                                  "nothing moved - PASSING the asked hero's "
+                                  "turn")
+                        self.actuator.execute(plan)
+                        self._stuck_rotations = 0
+            n = len(self.acted)
+            self.acted.clear()
+            self._continued.clear()
+            self._deferred.clear()
+            self._say(f"  [act] [battle] enemy bars read {red:.3f} - the fight "
+                      f"is real; forgot {n} played-turn mark(s) so every hero "
+                      f"is tried afresh" if red is not None else
+                      "  [act] [battle] enemy bars unreadable - forgot the "
+                      "played-turn marks")
+            return
+        if not (self.armed and self._focused_or_wait()):
+            return
+        self._say("  [act] [battle] no enemy on screen while the save says a "
+                  "fight - one step to make the game write the save")
+        self.actuator.execute(InputPlan(
+            (Step("key", vk=VK_D, hold=0.2, label="edge D"),),
+            "route", "end a fight the save has not seen end"))
+
     def _handle(self, update) -> None:
         # **Every drop says so.** A battle turn that reaches the body below
         # always prints something -- a plan or a refusal -- so a log that shows
@@ -1968,7 +2450,12 @@ class ActRunner:
         # Before anything else: a modal makes every layer below look broken.
         if self._answer_hunger():
             return
+        if self._answer_journal():
+            return
         phase = getattr(update, "phase", "")
+        if phase == "phantom_fight":
+            self._answer_phantom_fight()
+            return
         if phase == "room":
             if self._refresh_layout() is None:
                 return
@@ -2036,6 +2523,32 @@ class ActRunner:
                 where = f"  [rank {implied}, agreed]"
         self._say(f"  [act] [battle] bar: "
                   f"{bar if bar is not None else 'unreadable'}{where}")
+        # **THE SCREEN SAYS THE TURN IS DUE, whatever the save says.** The save
+        # is written per turn, so a hero's advice arrives "provisional" (enemy
+        # turns still to resolve) while the game is already asking that hero:
+        # the bar is lit. Live 2026-09-23 every such turn waited out a 25 s
+        # stall first. When the bar is waiting AND the hero panel names the
+        # advised hero, the timing gates are the save being late, not the
+        # turn being early.
+        if (getattr(update, "provisional", False)
+                or getattr(update, "enemies_first", 0)
+                or getattr(update, "movers", ()))                 and bar is not None and bar.waiting:
+            asked = self._asked_hero(update)
+            mine = getattr(update, "actor_class", "") or ""
+            if asked and mine and asked == mine:
+                try:
+                    from dataclasses import replace as _replace  # noqa: PLC0415
+                    # `movers` too: a repositioning enemy "still to act" is
+                    # the same late save -- live 2026-09-24 a Bone Arbalist
+                    # held an Occultist the game was already asking.
+                    update = _replace(update, provisional=False,
+                                      enemies_first=0, movers=())
+                    self._say(f"  [act] [battle] the game is asking the {asked} "
+                              f"now - not waiting for the save")
+                except Exception:                            # noqa: BLE001
+                    pass
+        if getattr(update, "battle_item", ()) and not getattr(update, "provisional", False):
+            self._use_battle_item(update)
         plan = plan_battle(update, self.resolved, bar)
         if not plan.actionable:
             self.stats["refused"] += 1
@@ -2144,6 +2657,7 @@ class ActRunner:
         # input Fran could see landing on his screen. The action bar is the
         # right witness, because a new stance lights DIFFERENT skills -- so a
         # changed skill pattern is the game itself acknowledging the change.
+        plan = self._retarget_to_a_legal_hero(update, plan, bar)
         tries = 1 if self.on_turn_missed is not None else 0
         if plan.screen_witness and not plan.continues_turn:
             # Same split as the free action above, for the same reason and a
@@ -2282,6 +2796,53 @@ class ActRunner:
         if not self._was_in_battle:
             self._dismiss_stray_curio_panel()
 
+        # **THE SURVIVAL LAYER SAYS LEAVE, AND BETWEEN ROOMS THE EXIT IS THE
+        # SEAL RATHER THAN THE COMBAT RETREAT.** `plan_battle` has acted on
+        # `retreat_advised` since the six-polls-of-RETREAT incident, but that
+        # is the BATTLE path: out of combat there is no retreat button, the
+        # verdict went nowhere, and a party told to leave kept walking to the
+        # next room. Measured 2026-09-21 on Fran's campaign -- two heroes
+        # left, the Houndmaster on 4 HP at 100 stress, `advise_retreat`
+        # reporting P(finish intact) 0% and P(a death) 75% -- and the router
+        # planned the next corridor. Fran, watching: *"its stuck on the
+        # hunger page or retire from the dungeon"*.
+        #
+        # `_leave_raid` normally runs with the objective MET, and here it
+        # deliberately does not: forfeiting the quest is the WHOLE POINT of a
+        # retreat, and the bill for it was already priced against pushing on.
+        # The condition that actually keeps this safe is the same one that
+        # always did -- no battle is on, which this path hangs off.
+        #
+        # It waits for the loot window to clear (`_was_in_battle`), because
+        # leaving with it open would abandon loot already won for no gain.
+        if getattr(update, "retreat_advised", False) and not self._was_in_battle:
+            seen = ""
+            try:
+                from bridge import screen as screen_mod  # noqa: PLC0415
+                seen = screen_mod.recognise_live(self.window) or ""
+            except Exception:                            # noqa: BLE001
+                seen = ""
+            self._say("  [act] [raid] the survival layer says LEAVE - "
+                      "abandoning the quest by the HUD seal")
+            # **With the objective MET the exit is the SEAL, not the X.**
+            # Live 2026-09-25: RETURN and RETREAT agreed, a completed quest's
+            # HUD shows no abandon scroll, the X click hit nothing, and
+            # `raid-abandoned` then barred every later poll -- thirteen
+            # iterations of 189 s each, one click apiece.
+            met = bool(getattr(getattr(update, "room_advice", None),
+                               "raid_end", "")) or seen == "quest_complete"
+            # **A banner that is up is answered, not clicked behind.** Live
+            # 2026-09-27: `quest_complete` on screen, the seal clicked under
+            # the modal, nothing moved, and `raid-left` then made every later
+            # poll return silently -- the party stood in rooG with the
+            # survival layer saying LEAVE until the iteration was killed.
+            if seen == "quest_complete":
+                from types import SimpleNamespace   # noqa: PLC0415
+                if self._end_raid(SimpleNamespace(raid_end="return")):
+                    return
+            if self._leave_raid(seen, abandon=not met):
+                return
+
         # No fight behind this block, so the formation is the one the human
         # arranged. First such sighting IS the marching order -- see
         # `_sort_into_marching_order` for why it has to be watched.
@@ -2308,6 +2869,7 @@ class ActRunner:
             self._continued.clear()
             self._deferred.clear()
             self.gave_up_on.clear()
+            self._fed_again_after_fight()
             self._said = {t for t in self._said if not t.startswith("acted")}
             self._take_loot()
             # Now it is safe: whatever is still up after SPACE is not a loot
@@ -2317,6 +2879,10 @@ class ActRunner:
                 return
             self._reset_formation()
             # ...and fall through, because nothing will bring us back here.
+        elif self._formation_due:
+            # Put off behind the Quest Complete banner; retried every poll
+            # until the banner is gone and the click can land.
+            self._reset_formation()
 
         if advice is None:
             return
@@ -2325,6 +2891,8 @@ class ActRunner:
         # banner that blocks all the others.
         if self._end_raid(advice):
             return
+        if getattr(advice, "provisions", ()) and self.armed:
+            self._use_provisions(advice, area)
         plan = plan_room(advice, None, area=area)
         if not plan.actionable:
             self.stats["refused"] += 1
@@ -2368,7 +2936,18 @@ class ActRunner:
             # an input that destroys something is sent once and REPORTED,
             # never re-sent on the word of a channel that has not answered.
             tries = 1 if plan.layer == "torch" else 0
-            if self._send_and_confirm(plan, attempts=tries):
+            # And a SHORT wait for it: the save does not write torchlight in a
+            # room either, so the full 15 s was a guaranteed wait for nothing
+            # on every relight (live 2026-09-25, twice in one raid, each
+            # followed by the torch having gone up after all).
+            if plan.layer == "torch":
+                if self._send_and_confirm(plan, attempts=1,
+                                          ack_timeout=TORCH_ACK_TIMEOUT):
+                    self.stats["acted"] += 1
+                else:
+                    self._say("  [act] [torch] sent once; the save writes the "
+                              "torch per turn, so the next area confirms it")
+            elif self._send_and_confirm(plan, attempts=tries):
                 self.stats["acted"] += 1
             # ...and carry on to the walk either way. Same rule as the curio
             # above: this room is never published again, so a `return` here --
@@ -2443,6 +3022,16 @@ class ActRunner:
         self._park_cursor()
         img = screen_mod.grab(self.window)
         showing = screen_mod.panel(img, self._raid_is_running())
+        if not showing and screen_mod.title_card_is_up(img):
+            # **The dungeon's title card is still up.** Measured 2026-09-23:
+            # the embark walk ended before the Cove card was recognised, and
+            # the route refused "cannot tell which panel is up" for seven
+            # minutes on a screen that wanted one SPACE.
+            self._say("  [act] [route] the dungeon title card is up - SPACE")
+            self.actuator.execute(InputPlan(
+                (Step("key", vk=VK_SPACE, label="dismiss the title card"),),
+                "route", "the dungeon title card"))
+            return
         if not showing:
             self._say("  [act] [route] cannot tell which panel is up - "
                       "not pressing TAB blind")
@@ -2466,7 +3055,7 @@ class ActRunner:
 
         point, why = (None, "the route named no room to walk to")
         if target and dungeon is not None:
-            point, why = mappanel.locate(img, dungeon, target)
+            point, why = mappanel.locate(img, dungeon, target, here=area)
             # **The map panel keeps its zoom and pan between openings.** A fit
             # can therefore fail for no better reason than that the view is
             # zoomed in on the party: measured live at 2 cells drawn where the
@@ -2487,10 +3076,31 @@ class ActRunner:
             # reset was skipped and the turn given up on. An empty panel is the
             # most view-ish refusal there is -- reopening is exactly what fixes
             # a frame caught mid-animation.
+            #
+            # **"IS NOT DRAWN ON THE MAP" BELONGS HERE TOO, and it was the
+            # one left out.** The note above reasons that a room which has
+            # not been scouted cannot be made to appear by reopening -- true,
+            # and it is not the common case. DD draws every room it has a
+            # cell for, including unexplored ones, so the usual reason a
+            # target is not drawn is that the VIEW is zoomed past it.
+            # Measured live 2026-09-20 in a crypts raid: `rooD is not drawn`
+            # at 5 cells, the hover phase confirmed nothing, the click went
+            # out anyway and missed, and the reset on the NEXT poll found
+            # **12 cells of 12 frames** and the click landed. Four polls and
+            # one wasted click, every time, for a two-keystroke fix that was
+            # already written.
+            #
+            # Bounded per destination, which is what keeps a genuinely
+            # unscouted room from paying `MAP_RESET_WATCH` on every poll: the
+            # first refusal for a given target resets, and the rest fall
+            # through to the hover exactly as they did.
             if point is None and ("could not fit the map" in why
-                                  or "nothing is drawn" in why):
+                                  or "nothing is drawn" in why
+                                  or ("is not drawn on the map" in why
+                                      and target not in self._view_reset_for)):
+                self._view_reset_for.add(target)
                 again = self._reset_map_view(screen_mod, mappanel,
-                                             dungeon, target)
+                                             dungeon, target, here=area)
                 if again is not None:
                     img, point, why = again
         # **THE FIT IS A PREFERENCE AND THE GAME IS THE AUTHORITY.** A
@@ -2557,6 +3167,7 @@ class ActRunner:
             fresh = again = None
             why_again = "no map frame to re-measure"
             best_seen = (-1, -1.0)
+            prev_got = None
             for attempt in range(MAP_REFIT_TRIES):
                 if attempt:
                     time.sleep(MAP_REFIT_STEP)
@@ -2566,7 +3177,7 @@ class ActRunner:
                     continue
                 if fresh is None:
                     fresh = shot                 # something to bank on refusal
-                got, note = mappanel.locate(shot, dungeon, target)
+                got, note = mappanel.locate(shot, dungeon, target, here=area)
                 if got is None:
                     why_again = note
                     continue
@@ -2584,6 +3195,20 @@ class ActRunner:
                     rank = (0, 0.0)
                 if rank > best_seen:
                     best_seen, again, why_again, fresh = rank, got, note, shot
+                # **A STILL view beats the best-scoring one.** The panel eases
+                # after a reset, and the best-scoring frame can be one taken
+                # BEFORE it settled. Live 2026-09-23 in the Ruins: the party
+                # room sat at client (786, 548) in the fitted frame and at
+                # (855, 587) when the click landed, so `rooE` was clicked on
+                # empty grid and the raid sat in `rooA`. Two consecutive fits
+                # agreeing on the target means the view has stopped: take
+                # that one and stop sampling.
+                if prev_got is not None and max(
+                        abs(got[0] - prev_got[0]),
+                        abs(got[1] - prev_got[1])) <= MAP_POINT_TOLERANCE:
+                    again, why_again, fresh = got, note, shot
+                    break
+                prev_got = got
             if fresh is not None:
                 if again is None:
                     self.stats["refused"] += 1
@@ -2643,6 +3268,40 @@ class ActRunner:
                     offered = True
                     break
             if not offered:
+                # **THE SAVE-ORDERED PHASE IS THE FALLBACK HERE TOO, and its
+                # absence is what a live raid stalled on.** When the fit
+                # produces NO point, `_ask_the_game_which_cell` runs and ends
+                # in a documented last resort -- *"a click that misses costs
+                # one poll, never clicking costs the raid"*. When the fit
+                # produces a point the game then REFUSES, there was no such
+                # path: this branch refused and returned, every poll, forever.
+                #
+                # Live 2026-09-20, the last thing the overnight loop did:
+                # `the game offers no move at or near rooE - not clicking
+                # blind`, then six identical room plans and the stall line.
+                # The party had somewhere to go and the layer that knows how
+                # to find it was never asked.
+                #
+                # It is the same asymmetry the last-resort comment already
+                # argues against, one branch along. The ordering it uses comes
+                # from the SAVE -- the party's own cell found by its torch,
+                # and the direction to the destination in map units -- not
+                # from the transform that was just refused.
+                spot = self._ask_the_game_which_cell(
+                    screen_mod, mappanel, img, dungeon, area, target)
+                if spot is not None:
+                    at = self.resolved.win.to_screen(*spot)
+                    self._say(f"  [act] [route] the fit's point and its "
+                              f"neighbours were all refused; falling back to "
+                              f"the save-ordered search")
+                    point = spot
+                    plan = InputPlan(
+                        (Step("click", screen=at,
+                              label=f"{target} on the map"),), "route",
+                        f"leave {area or 'this room'} for {target} "
+                        f"(save-ordered, {why})")
+                    offered = True
+            if not offered:
                 self.stats["refused"] += 1
                 self._say(f"  [act] [route] the game offers no move at or "
                           f"near {target} - not clicking blind")
@@ -2683,7 +3342,7 @@ class ActRunner:
             # _keys`). This is not a refusal: a click was really sent and
             # really missed, and leaving the view where that put it is what
             # loses the map.
-            self._reset_map_view(screen_mod, mappanel, dungeon, target)
+            self._reset_map_view(screen_mod, mappanel, dungeon, target, here=area)
 
     # DO NOT press `W` here as a fallback. Tried on 2026-09-01 and REVERTED
     # the same hour, unflown, because Fran named the geometry that makes it
@@ -2704,7 +3363,7 @@ class ActRunner:
     # the party is on. Direction is what that needs, and `Heading` is where it
     # would come from.
 
-    def _reset_map_view(self, screen_mod, mappanel, dungeon, target):
+    def _reset_map_view(self, screen_mod, mappanel, dungeon, target, here=""):
         """TAB away and back, and return the best frame of the animation.
 
         `(img, point, why)`, or None if the panel never came back.
@@ -2766,7 +3425,7 @@ class ActRunner:
                     img, self._raid_is_running()) == "map":
                 seen += 1
                 cells = len(mappanel.find_boxes(img))
-                point, why = mappanel.locate(img, dungeon, target)
+                point, why = mappanel.locate(img, dungeon, target, here=here)
                 if point is not None:
                     if cells > best_cells:
                         best, best_cells = (img, point, why), cells
@@ -3297,6 +3956,12 @@ class ActRunner:
         that quietly outlives the process would stop anyone noticing.
         """
         targets = torch_targets(self.resolved)
+        # **A candidate that RAISED the torch is removed, not reordered.**
+        # It is the USE control, so trying it again spends another torch and
+        # lights the room; there is no ordering in which that is worth doing.
+        raiser = getattr(self, "_torch_raiser", None)
+        if raiser is not None:
+            targets = tuple(t for t in targets if t[1] != raiser[1])
         found = getattr(self, "_torch_point", None)
         if found is None:
             return targets
@@ -3328,6 +3993,14 @@ class ActRunner:
         and the turn is still played: a snuff that swallowed the attack would
         forfeit the very kill it exists to sweeten.
         """
+        # **One failure a raid is enough.** Live 2026-09-24 the snuff was
+        # swept, refuted and re-tried on fight after fight -- 16 times in two
+        # raids, 32 dead clicks on the torch. Until the gesture is found, a
+        # snuff that did not take once is not sent again this raid.
+        if getattr(self, "_snuff_failed", False):
+            self._say_once("snuff-off", "  [act] [torch] the snuff already "
+                                        "failed this raid - not trying again")
+            return False
         level = self._torch_now()
         if level is None:
             self._say("  [act] [torch] cannot read the torch - "
@@ -3338,11 +4011,29 @@ class ActRunner:
         if not targets:
             self._say("  [act] [torch] no calibrated torch meter")
             return False
+        # The candidate the sweep tries first: the remembered winner when the
+        # runner has one, otherwise the best guess. It is the ONLY one allowed
+        # a burst of clicks the save has not answered for.
+        first = targets[0]
 
         for name, point in targets:
             if level <= 0.0:
                 break
-            snuff = plan_snuff_torch(self.resolved, point, name)
+            # **THE FULL SNUFF IS N SHIFT-CLICKS, NOT ONE CTRL+SHIFT CLICK.**
+            # Measured live 2026-09-21 against DD's own light tooltip:
+            # CTRL+SHIFT sent through `SendInput` moves the light 25, exactly
+            # like SHIFT -- `RADIANT LIGHT ( 100 )` -> `DIM LIGHT ( 75 )` --
+            # because CTRL does not reach SDL even held for 0.35s. An earlier
+            # reading in the same session called it a full snuff and is
+            # RETRACTED: it was taken at light 25, where -25 and -100 both
+            # land on 0 and the two cannot be told apart.
+            #
+            # Four SHIFT clicks at the dial took 75 -> `BLACK AS PITCH ( 0 )`
+            # in one gesture, so that is what gets sent. `plan_reduce_torch`
+            # already paces them at `TORCH_CLICK_GAP`.
+            need = int(math.ceil(level / TORCH_STEP))
+            snuff = plan_reduce_torch(
+                self.resolved, min(need, TORCH_MAX_CLICKS), point)
             if not snuff.actionable:
                 continue
             self._say(f"  [act] {snuff}")
@@ -3352,22 +4043,81 @@ class ActRunner:
             level, witnessed = self._torch_settled(level)
             moved = level < opened
 
-            for _ in range(TORCH_MAX_CLICKS):
-                if level <= 0.0 or not witnessed:
+            # **A RISE IS NOT A MISS, AND SWEEPING ON AFTER ONE BURNS A TORCH
+            # PER CANDIDATE.** This branch used to read `level > opened` as
+            # "did not move" and try the next point, so a modifier that failed
+            # to arrive could spend several torches raising the light to 100 in
+            # the middle of the fight the snuff existed to darken. Measured
+            # live 2026-09-21: 82 -> 100 on a killing blow. The candidate that
+            # did this is the torch's USE control, so it is recorded as one to
+            # keep away from rather than merely "not the widget".
+            if level > opened:
+                self._torch_raiser = (name, point)
+                self._say(f"  [act] [torch] STOP - the torch went UP "
+                          f"{opened:.0f} -> {level:.0f}. '{name}' is the USE "
+                          f"control and the modifier did not arrive, so that "
+                          f"click spent a torch and lit the room. Not trying "
+                          f"another candidate.")
+                return False
+
+            if witnessed and not moved:
+                # **This point is not the widget** -- and only because the
+                # save answered. Nothing moved, so clicking it harder cannot
+                # help; try the next candidate rather than spend the turn.
+                # That is the whole reason there is more than one.
+                self._say(f"  [act] [torch] {level:.0f} did not move - "
+                          f"{name} is not the torch widget")
+                continue
+
+            # **A PARTIAL SNUFF IS WORTH ALMOST NOTHING, AND THAT IS WHAT WAS
+            # BEING SENT.** `str_snuff_torch_tip` documents SHIFT+CTRL+CLICK
+            # as a full snuff, but Fran has seen the game take it as the
+            # SHIFT+CLICK reduction -- one 25-point step -- and the loop that
+            # was meant to finish the job required a SAVE WRITE between every
+            # click. A snuff is sent inside a hero's turn, so the next write
+            # is the swing that has not happened yet: the first read came back
+            # unwitnessed and the whole thing stopped after one click. Live
+            # 2026-09-20 that left the torch at 20 with the log reporting it
+            # had not moved at all. Fran: *"it only clicks once ... usually
+            # you want full snuff of the torch for best value"*.
+            #
+            # The darkness table is why the difference is not marginal: at 1-25
+            # a fight's bonus is +8 treasure draws and +15% gold, and at 0 it
+            # is +12 and +30%. Stopping one step short gives up the bracket
+            # the play exists to reach.
+            #
+            # So the remaining steps are sent as ONE plan and verified
+            # afterwards, rather than each one being gated on an answer that
+            # cannot arrive yet. Sending them blind is bounded twice: by the
+            # torch level itself, and to the candidate the sweep would try
+            # first -- which `_torch_order` makes the remembered winner when
+            # there is one. A candidate the save has REFUTED never gets here.
+            # **The first plan already sent the whole ladder**, so its clicks
+            # count against the budget: starting this at 0 spent it twice and
+            # sent eight clicks for a four-step snuff.
+            sent = len(snuff.steps)
+            while (level > 0.0 and sent < TORCH_MAX_CLICKS
+                   and (moved or (name, point) == first)):
+                need = int(math.ceil(level / TORCH_STEP))
+                step = plan_reduce_torch(
+                    self.resolved, min(need, TORCH_MAX_CLICKS - sent), point)
+                if not step.actionable:
                     break
-                step = plan_reduce_torch(self.resolved, 1, point)
-                if not step.actionable or not self.actuator.execute(step):
+                self._say(f"  [act] {step}")
+                if not self.actuator.execute(step):
                     return False
                 self.stats["acted"] += 1
+                sent += len(step.steps)
                 after, witnessed = self._torch_settled(level)
                 if after >= level:
-                    # **This point is not the widget** -- and only because the
-                    # save answered. Nothing moved, so clicking it harder
-                    # cannot help; try the next candidate rather than spend
-                    # the turn. That is the whole reason there is more than one.
+                    # Either the widget stopped responding (witnessed) or
+                    # nobody answered (not witnessed). Neither is a reason to
+                    # click again: the first says it cannot go lower, the
+                    # second says another click would tell us no more than
+                    # the last one did.
                     break
-                level = after
                 moved = True
+                level = after
 
             if moved:
                 # It IS the widget. Remember it, and SAY so -- this line is
@@ -3383,17 +4133,16 @@ class ActRunner:
                 # one is a live click into a running game. One live run spent
                 # sixteen of them and learned nothing.
                 self._say(f"  [act] [torch] {level:.0f} unchanged and the save "
-                          f"has not been written since the click, so this says "
+                          f"has not been written since the clicks, so this says "
                           f"nothing about {name} - stopping the sweep")
                 break
-            self._say(f"  [act] [torch] {level:.0f} did not move - "
-                      f"{name} is not the torch widget")
 
         if level <= 0.0:
             self._say(f"  [act] [torch] out ({opened:.0f} -> 0)")
             return True
         self._say("  [act] [torch] the torch did not go out - tried "
                   + ", ".join(n for n, _pt in targets))
+        self._snuff_failed = True
         return False
 
 
@@ -3567,7 +4316,7 @@ class ActRunner:
                 return
             self.stats["acted"] += 1
             time.sleep(PANEL_WAIT)       # let the panel draw
-            self._work_curio_panel(name, advice)
+            self._work_curio_panel(name, advice, area=area, curio_id=curio_id)
             worked, why = self._curio_landed(area, curio_id)
             if worked:
                 self._say(f"  [act] [curio] {name}: {why}")
@@ -3604,6 +4353,10 @@ class ActRunner:
                     "it is behind the party now and walking further would go "
                     "into the door")
                 return
+            nores = getattr(self, "_curio_nores", None)
+            if nores is None:
+                nores = self._curio_nores = {}
+            nores[name] = nores.get(name, 0) + 1
             self._say(f"  [act] [curio] {name} did not respond ({why}) - "
                       f"{'sweeping on' if swept else 'one more step'} and "
                       f"trying again")
@@ -3618,7 +4371,24 @@ class ActRunner:
                 self._bank_curio(name)
                 return
 
-    def _work_curio_panel(self, name: str, advice=None) -> bool:
+    def _corridor_has_obstacle(self, area: str) -> bool:
+        """Does `area` still hold an uncleared obstacle (tile content 4)?"""
+        try:
+            from bridge.dungeon_map import (CONTENT_OBSTACLE,   # noqa: PLC0415
+                                            read_dungeon_map)
+            if self.raid_path is None or not area:
+                return False
+            path = Path(str(self.raid_path).replace("raid.json", "map.json"))
+            dungeon = read_dungeon_map(path)
+            there = dungeon.areas.get(area) if dungeon else None
+            return there is not None and any(
+                getattr(t, "content", None) == CONTENT_OBSTACLE
+                for t in there.tiles)
+        except Exception:                                     # noqa: BLE001
+            return False
+
+    def _work_curio_panel(self, name: str, advice=None, area: str = "",
+                          curio_id: str = "") -> bool:
         """`W` opened the panel. Click the hand, or the item, inside it.
 
         **This is the half that was missing.** `W` was never the problem: it
@@ -3681,6 +4451,38 @@ class ActRunner:
                       "the row around it is not a curio panel - leaving it")
             return False
 
+        # **The OBSTACLE's panel, not this curio's.** Live 2026-09-24 in the
+        # Warrens: walking to a sconce, the party met the rubble first, its
+        # panel came up, and this path clicked the HAND -- cleared bare-
+        # handed (-20 torch; 100 -> 56 over one corridor) with shovels in the
+        # pack. A curio that takes no provision never lights an item slot,
+        # so a lit slot while the corridor still holds an obstacle means the
+        # panel is the obstacle's: `_work_obstacle_panel` uses the shovel.
+        if area and found.sole_item() is not None                 and self._corridor_has_obstacle(area):
+            try:
+                from bridge import curios as _curios     # noqa: PLC0415
+                cur = _curios.definition_for(curio_id or name)
+                takes_items = bool(cur and cur.items)
+            except Exception:                            # noqa: BLE001
+                takes_items = True
+            if not takes_items:
+                self._say(f"  [act] [curio] a lit item slot on the way to "
+                          f"{name}, which takes none, and {area} still holds "
+                          f"an obstacle - that is the obstacle's panel")
+                return self._work_obstacle_panel(area)
+
+        # **An item-taking curio behind an OBSTACLE.** Live 2026-09-26: the
+        # party met rubble on the way to an altar_of_light, the rubble's
+        # panel came up, and holy water was right-clicked into it ten times
+        # (nothing spent, nothing cleared, the altar abandoned). The guard
+        # above only covers curios that take no item. Once a use has gone
+        # unanswered with the corridor still blocked, the panel is the
+        # obstacle's.
+        if (area and self._corridor_has_obstacle(area)
+                and (getattr(self, "_curio_nores", None) or {}).get(name, 0) >= 1):
+            self._say(f"  [act] [curio] {name} did not answer and {area} still "
+                      f"holds an obstacle - clearing the obstacle first")
+            return self._work_obstacle_panel(area)
         want = (getattr(advice, "curio_item", "") or "") if advice else ""
         if want and getattr(advice, "curio_action", "") == "use":
             return self._use_on_curio(name, want, found)
@@ -3713,19 +4515,35 @@ class ActRunner:
         raid once: it is modal over the world, so every keystroke after it goes
         into the panel and the route layer reports "no save change in 15s".
         """
-        pt = found.sole_item()
-        if pt is None:
-            lit = sum(1 for ok in found.usable if ok)
-            why = ("the slot is empty or greyed out" if not lit
-                   else f"{lit} slots are lit and nothing says which is {item}")
-            self._say(f"  [act] [curio] {name} wants {item} and {why} - "
-                      f"closing the panel rather than guessing")
-            self._close_curio_panel(found, f"cannot spend {item} on {name}")
-            return False
-        screen_pt = self.resolved.win.to_screen(*pt)
-        self._say(f"  [act] [curio] panel is up - using {item} on {name} "
-                  f"at {screen_pt}")
-        plan = InputPlan((Step("click", screen=screen_pt,
+        # **THE VERB IS A RIGHT-CLICK ON THE INVENTORY, and the bridge had
+        # neither half of that.** `[pc]str_help_raid_room_6`: *"While
+        # interacting with an object: [RIGHT-CLICK] an inventory item to
+        # apply it to the object."* This used to LEFT-click a slot on the
+        # CURIO PANEL -- wrong button and wrong widget -- so every loot curio
+        # that wanted a key or a shovel was unreachable. Fran, 2026-09-21:
+        # *"the model seems to be unable to use inventory items to right
+        # click with curio, specially with loot curios"*.
+        #
+        # The pack slot comes from the SAVE, which names what is in every
+        # cell, rather than from the panel's own item row: the save is exact
+        # about WHICH item, and the panel only ever said how many slots were
+        # lit. `sole_item` remains the fallback for a pack that cannot be
+        # read.
+        screen_pt, how = self._pack_slot_for(item)
+        if screen_pt is None:
+            pt = found.sole_item()
+            if pt is None:
+                lit = sum(1 for ok in found.usable if ok)
+                why = ("the slot is empty or greyed out" if not lit
+                       else f"{lit} slots are lit and nothing says which is {item}")
+                self._say(f"  [act] [curio] {name} wants {item}, {how}, and "
+                          f"{why} - closing the panel rather than guessing")
+                self._close_curio_panel(found, f"cannot spend {item} on {name}")
+                return False
+            screen_pt, how = self.resolved.win.to_screen(*pt), "the panel's item slot"
+        self._say(f"  [act] [curio] panel is up - right-clicking {item} on "
+                  f"{how} at {screen_pt} for {name}")
+        plan = InputPlan((Step("rclick", screen=screen_pt,
                                label=f"{item} on the curio"),),
                          "curio", f"use {item} on {name}")
         if not self.actuator.execute(plan):
@@ -3733,6 +4551,173 @@ class ActRunner:
         self.stats["acted"] += 1
         time.sleep(0.8)                          # let the interaction animate
         return True
+
+    def _use_provisions(self, advice, area: str) -> None:
+        """Use each provision the decide layer named, on its trigger.
+
+        Measured live 2026-09-25: out of combat, clicking a hero's sprite
+        selects them and a RIGHT-click on a pack cell uses that item on them
+        (food 12 -> 11, the Musketeer 10 -> 12 HP); at full HP the game refuses
+        the food and nothing is spent. So:
+
+        * the INVENTORY panel must be the one up (TAB swaps it with the map --
+          `_show_map` swaps back when it is time to leave);
+        * every use is sent ONCE and witnessed by the pack count, since a
+          provision is consumed and a retry on silence spends a second one;
+        * food is capped per hero at `max_provisions_before_full` and a portion
+          the pack did not lose marks that hero full for the raid.
+        """
+        from bridge import screen as screen_mod           # noqa: PLC0415
+        from bridge.provision_use import MAX_FOOD_BEFORE_FULL  # noqa: PLC0415
+        if not self._focused_or_wait():
+            return
+        sent = getattr(self, "_provisions_sent", None)
+        if sent is None:
+            sent = self._provisions_sent = {}
+        full = getattr(self, "_food_full", None)
+        if full is None:
+            full = self._food_full = set()
+        panel_ok = False
+        for guid, rank, item, why in advice.provisions:
+            key = (area, guid, item)
+            if item == "food":
+                eaten = sum(n for (a, g, i), n in sent.items()
+                            if g == guid and i == "food")
+                if guid in full or eaten >= MAX_FOOD_BEFORE_FULL:
+                    continue
+            elif sent.get(key):
+                continue                  # one cure per hero per area
+            if not panel_ok:
+                self._park_cursor()
+                img = screen_mod.grab(self.window)
+                showing = screen_mod.panel(img, self._raid_is_running())
+                if showing == "map":
+                    self.actuator.execute(InputPlan(
+                        (Step("key", vk=VK_TAB, label="swap to the pack"),),
+                        "provision", "the pack, to use a provision"))
+                    time.sleep(0.6)
+                    showing = screen_mod.panel(screen_mod.grab(self.window),
+                                               self._raid_is_running())
+                if showing != "inventory":
+                    self._say(f"  [act] [provision] cannot see the pack "
+                              f"(panel: {showing or 'unknown'}) - not using {item}")
+                    return
+                panel_ok = True
+            hero_pt = self.resolved.point("hero", int(rank) - 1)
+            slot_pt, how = self._provision_slot(item)
+            if hero_pt is None or slot_pt is None:
+                self._say(f"  [act] [provision] no point for rank {rank} or "
+                          f"{item} ({how}) - skipped")
+                continue
+            before = self._provision_count(item)
+            self._say(f"  [act] [provision] {item} on rank {rank} - {why}")
+            self.actuator.execute(InputPlan(
+                (Step("click", screen=hero_pt, label=f"select rank {rank}"),
+                 Step("rclick", screen=slot_pt, label=f"use {item}")),
+                "provision", f"use {item}"))
+            sent[key] = sent.get(key, 0) + 1
+            self.stats["acted"] += 1
+            after = before
+            for _ in range(5):
+                time.sleep(0.5)
+                after = self._provision_count(item)
+                if before is not None and after is not None and after < before:
+                    break
+            if before is not None and after is not None and after < before:
+                self._say(f"  [act] [provision] used - {item} {before} -> {after}")
+            elif item == "food":
+                full.add(guid)
+                self._say("  [act] [provision] the food was not eaten - "
+                          "treating that hero as full")
+            else:
+                self._say(f"  [act] [provision] {item} count did not move "
+                          f"({before} -> {after}) - sent once, not retried")
+
+    def _use_battle_item(self, update) -> None:
+        """Right-click the provision `run.py` named, on the acting hero's own
+        turn -- a free action, so the skill plan follows unchanged. Sent once
+        per turn and witnessed by the pack count; never retried."""
+        from bridge import screen as screen_mod           # noqa: PLC0415
+        item, why = update.battle_item
+        key = ("battle-item", tuple(getattr(update, "turn_key", ()) or ()), item)
+        if key in self.acted:
+            return
+        self.acted.add(key)
+        img = screen_mod.grab(self.window)
+        showing = screen_mod.panel(img, self._raid_is_running())
+        if showing == "map":
+            self.actuator.execute(InputPlan(
+                (Step("key", vk=VK_TAB, label="swap to the pack"),),
+                "provision", "the pack, for a battle item"))
+            time.sleep(0.6)
+            showing = screen_mod.panel(screen_mod.grab(self.window),
+                                       self._raid_is_running())
+        if showing != "inventory":
+            self._say(f"  [act] [provision] cannot see the pack - not using {item}")
+            return
+        slot_pt, how = self._provision_slot(item)
+        if slot_pt is None:
+            self._say(f"  [act] [provision] no {item} to use ({how})")
+            return
+        before = self._provision_count(item)
+        self._say(f"  [act] [provision] {item} before the skill - {why}")
+        self.actuator.execute(InputPlan(
+            (Step("rclick", screen=slot_pt, label=f"use {item}"),),
+            "provision", f"use {item} in the fight"))
+        self.stats["acted"] += 1
+        time.sleep(1.0)
+        after = self._provision_count(item)
+        self._say(f"  [act] [provision] {item} {before} -> {after}"
+                  + ("" if (before is not None and after is not None and after < before)
+                     else " (the save may answer at the end of the turn)"))
+
+    def _provision_slot(self, item: str):
+        """`(screen point, how)` for the pack cell holding `item`. Food is the
+        one supply the save files by TYPE ("provision") with no id."""
+        try:
+            from bridge.inventory import read_pack          # noqa: PLC0415
+            if self.raid_path is None:
+                return None, "no raid save"
+            pack = read_pack(Path(self.raid_path))
+        except Exception as exc:                            # noqa: BLE001
+            return None, f"the pack could not be read ({exc})"
+        hits = [sl for sl in pack if sl.amount > 0 and (
+            sl.id == item or (item == "food" and sl.type == "provision"
+                              and not sl.id))]
+        if not hits:
+            return None, f"the pack holds no {item}"
+        return self.resolved.inventory_point(hits[0].slot), f"slot {hits[0].slot}"
+
+    def _provision_count(self, item: str):
+        pack = self._read_pack()
+        if pack is None:
+            return None
+        return sum(sl.amount for sl in pack if sl.id == item or (
+            item == "food" and sl.type == "provision" and not sl.id))
+
+    def _pack_slot_for(self, item: str):
+        """Where `item` sits in the raid pack. `(screen point, description)`.
+
+        The SAVE names what is in every cell, so this is exact about which
+        item is being spent -- the curio panel's own row only ever said how
+        many slots were lit, which is why `sole_item` refuses whenever more
+        than one is. `layout.inventory_point` is the same 2x8 grid the discard
+        and stack-merge paths already use.
+        """
+        try:
+            from bridge.inventory import read_pack          # noqa: PLC0415
+            if self.raid_path is None:
+                return None, "there is no raid save to read the pack from"
+            pack = read_pack(Path(self.raid_path))
+        except Exception as exc:                            # noqa: BLE001
+            return None, f"the pack could not be read ({exc})"
+        hits = [s for s in pack if s.id == item and s.amount > 0]
+        if not hits:
+            return None, f"the pack holds no {item}"
+        at = self.resolved.inventory_point(hits[0].slot)
+        if at is None:
+            return None, f"{item} is in slot {hits[0].slot}, which is off the grid"
+        return at, f"pack slot {hits[0].slot}"
 
     def _work_obstacle_panel(self, area: str) -> bool:
         """A panel came up where a door was expected. Clear the obstacle.
@@ -3869,6 +4854,10 @@ class ActRunner:
         # on the grabbed frame, which IS the client area, so the letterbox
         # correction would inset them twice. Same note as `_interact_curio`.
         pt = self.resolved.win.to_screen(*found.close)
+        # Banked first: some of these are TRAP panels in a trapped corridor,
+        # and a frame of one is what `traps.DISARM_MEASURED` waits for.
+        self._bank_frame("_stray_panel.png", "a panel nobody asked for - a "
+                         "curio, or a trap's disarm panel")
         self._say(f"  [act] [curio] a curio panel is still open - closing it "
                   f"at {pt}, it swallows every key while it stands")
         plan = InputPlan((Step("click", screen=pt, label="curio close"),),
@@ -4021,12 +5010,37 @@ class ActRunner:
         """
         before = self._read_pack()
         self._take_loot(after="the curio")
-        if self._curio_active(area, curio_id) is False:
-            return True, "it is used up"
-        after = self._read_pack()
-        if before is not None and after is not None and len(after) > len(before):
-            return True, f"the pack went {len(before)} -> {len(after)}"
-        return False, "still active and the pack did not grow"
+        # **Loot TAKEN is an answer**: SPACE moved the save, so a window was
+        # up. "Declined what did not fit" is NOT one, tempting as it was on
+        # 2026-09-25 (a crate whose loot did not fit was pressed four times
+        # and given up): that path is inferred from SPACE NOT moving the save
+        # with the pack over half full, which is also exactly what a W that
+        # opened nothing looks like. It needs a loot-window detector; the
+        # no-room path now banks `captures/_no_room.png` to build one from.
+        if getattr(self, "_loot_outcome", "") == "taken":
+            return True, "its loot was taken"
+        # **Polled, and by QUANTITY.** Live 2026-09-25 a discarded pack was
+        # opened on attempt 4 and pressed six more times: its gold merged
+        # into a stack already in the pack, so the slot COUNT stood still,
+        # and the save had not yet written `content = 0` when it was read
+        # once. Either answer can arrive late (the save is written per
+        # turn), so both are re-read for a short window before "no".
+        import time as _time                                 # noqa: PLC0415
+        # Against a real window only -- tests drive this with stand-ins whose
+        # save never changes, and a wait there is 2.5s of nothing per press.
+        hwnd = getattr(getattr(self.resolved, "win", None), "hwnd", None)
+        real = isinstance(hwnd, int) and bool(hwnd) and bool(user32.IsWindow(hwnd))
+        deadline = _time.time() + (CURIO_ACK_S if real else 0.0)
+        while True:
+            if self._curio_active(area, curio_id) is False:
+                return True, "it is used up"
+            after = self._read_pack()
+            grew = pack_grew(before, after)
+            if grew:
+                return True, f"the pack gained {grew}"
+            if _time.time() >= deadline:
+                return False, "still active and the pack did not grow"
+            _time.sleep(0.5)
 
     def _walked_past(self, area: str, curio_id: str) -> bool:
         """Is the curio now more than a tile BEHIND the party?
@@ -4117,15 +5131,39 @@ class ActRunner:
             return
         if self.resolved is None or not self._focused_or_wait():
             return
+        # **Not behind the Quest Complete banner.** Evidence 2026-09-28: the
+        # first numbered case (`captures/_party_order_1_*`) is the crest
+        # rising over the loot window -- the click landed on the modal and the
+        # next fight started out of order. The reset waits for the banner to
+        # be answered and runs on the first poll after.
+        seen = ""
+        try:
+            from bridge import screen as screen_mod     # noqa: PLC0415
+            seen = screen_mod.recognise_live(self.window) or ""
+        except Exception:                                # noqa: BLE001
+            seen = ""
+        if seen == "quest_complete":
+            self._formation_due = True
+            self._say_once("formation-deferred", "  [act] [route] the Quest "
+                           "Complete banner is up - the party order waits "
+                           "for it")
+            return
+        self._formation_due = False
         before = self._party_order()
         plan = InputPlan((Step("click", screen=self.resolved.party_order,
                                label="Default Party order"),),
                          "route", "put the party back in marching order")
         self._say(f"  [act] {plan}")
+        # Evidence (2026-09-28): the next fight started out of the marching
+        # order 38 times in 41, so the button's effect is banked either side.
+        self._bank_frame("_party_order_before.png", "the party before the "
+                         "Default Party order click")
         if not self.actuator.execute(plan):
             return
         self.stats["acted"] += 1
         time.sleep(0.5)                  # the heroes slide back into place
+        self._bank_frame("_party_order_after.png", "the party after the "
+                         "Default Party order click")
         after = self._party_order()
         if before and after and before != after:
             self._say(f"  [act] [route] party order {'>'.join(before)} "
@@ -4139,6 +5177,117 @@ class ActRunner:
         # Hence the watched `marching_order` and, when the button leaves the
         # party in the wrong one, explicit swaps.
         self._sort_into_marching_order(after)
+
+    #: What the screen becomes once the party is out of the dungeon. The
+    #: results chain, in the order DD draws it, plus the defeat variants --
+    #: leaving with a completed objective is a Victory page, leaving without
+    #: one is the same page relabelled, and neither is the bridge's business
+    #: here. Prefix-matched, so the `@defeat` suffixes come along.
+    LEFT_THE_RAID = ("raid_results", "raid_progression")
+
+    #: Screens that are DD's standard modal frame asking a Yes/No, where
+    #: `MODAL_OK` is the Yes.
+    #
+    # **The retreat confirm reads as `embark_underprepared`**, which is a
+    # different dialog drawn in the same frame, and gating the confirm on the
+    # exact name `modal` left the retreat dialog standing with the party in
+    # the dungeon. Measured 2026-09-21 on Fran's campaign: "Are you sure you
+    # want to retreat? The heroes will suffer the stress of defeat..." with
+    # Yes at client (630, 390) -- and `modal_ok` resolves to (631, 390), so
+    # the POINT was right all along and only the name was wrong. Fran,
+    # watching it sit there: *"needs to click the yes now to the are you sure
+    # screen"*.
+    CONFIRM_SCREENS = ("modal", "embark_underprepared")
+
+    def _leave_raid(self, seen, abandon: bool = False) -> bool:
+        """Leave by the HUD's abandon-quest banner. Out of combat only.
+
+        The caller has already established the two things that make this safe:
+        the objective is MET (`run.py` only fills `raid_end` once
+        `RoutePlan.targets` is empty) and no battle is on (this whole path
+        hangs off the room update). Sent under either of those being false it
+        would forfeit the expedition, which is why the gate lives in the
+        caller and there is no way to reach this from `plan_battle`.
+
+        Confirmed by the SCREEN reaching the results chain, not by a save
+        write -- the same reasoning `_end_raid` gives for the banner: the
+        button is a UI transition and DD writes the raid save on its own
+        schedule.
+        """
+        if not self.armed:
+            self._say_once("leave-raid-unarmed",
+                           "  [act] [raid] would LEAVE by the abandon-quest "
+                           "banner - not armed")
+            return True
+        # **ITS OWN KEY, and sharing `raid-end` would have re-created the very
+        # stranding this method exists to end.** `_end_raid` adds `raid-end`
+        # when it answers the banner -- including when it answers CONTINUE --
+        # so a raid that continued for a deferred curio would then find the
+        # guard already set and refuse to leave, once, silently, with the
+        # party standing in the entrance room.
+        key = "raid-abandoned" if abandon else "raid-left"
+        if key in self.acted:
+            # An abandon that did not get us out is not the end of it: the
+            # objective may be met (no X is drawn then), so try the seal
+            # ONCE rather than standing in the corridor for good.
+            if abandon and "raid-left" not in self.acted:
+                self._say("  [act] [raid] the abandon X did not leave - "
+                          "trying the quest seal")
+                return self._leave_raid(seen, abandon=False)
+            return True
+        # **The objective decides the widget.** The seal banks a COMPLETED
+        # quest; the X abandons an unfinished one and asks first.
+        plan = (plan_abandon_quest(self.resolved) if abandon
+                else plan_leave_raid(self.resolved))
+        if not plan.actionable:
+            self._say_once("leave-raid-refused", f"  [act] {plan}")
+            return False
+        if not self._focused_or_wait():
+            return False
+        self.acted.add(key)
+        if abandon:
+            self._say(f"  [act] [raid] RETREATING (screen: "
+                      f"{seen or 'UNKNOWN'}) - the X under the quest seal")
+        else:
+            self._say(f"  [act] [raid] the objective is met and no banner is "
+                      f"up (screen: {seen or 'UNKNOWN'}) - leaving by the "
+                      f"quest seal")
+        self._say(f"  [act] {plan}")
+        if not self.actuator.execute(plan):
+            return True
+        self.stats["acted"] += 1
+        from bridge import screen as screen_mod       # noqa: PLC0415
+        for _ in range(20):
+            time.sleep(0.5)
+            after = screen_mod.grab(self.resolved.win)
+            if after is None:
+                continue
+            now = screen_mod.recognise(after) or ""
+            if now.startswith(self.LEFT_THE_RAID):
+                self._say(f"  [act] [raid] out of the dungeon ({now})")
+                return True
+            # **ANSWER A MODAL IF ONE APPEARS, AND ONLY THEN.** With the
+            # objective met the seal goes straight to the results page and
+            # there is nothing to confirm -- measured. But "no dialog ever"
+            # is a claim about one situation, and a `MODAL_OK` sent blindly
+            # lands in whatever is drawn instead. So the confirm is a
+            # response to seeing one, not part of the plan.
+            if now in self.CONFIRM_SCREENS and "leave-confirm" not in self.acted:
+                ok = getattr(self.resolved, "modal_ok", None)
+                if ok is not None:
+                    self.acted.add("leave-confirm")
+                    self._say("  [act] [raid] a dialog came up - confirming")
+                    self.actuator.execute(InputPlan(
+                        (Step("click", screen=ok,
+                              label="confirm leaving the raid"),),
+                        "raid", "answer the leave dialog"))
+        # **Not a failure the loop should act on.** The confirm may simply be
+        # slow, and re-sending would click `MODAL_OK` into whatever is drawn
+        # next. `acted` already bars a second attempt this raid; the room
+        # stall line is what says so if nothing did happen.
+        self._say("  [act] [raid] the leave was sent and the results page has "
+                  "not appeared yet")
+        return True
 
     def _end_raid(self, advice) -> bool:
         """Press "Return to Hamlet" / "Continue Raid". True if handled.
@@ -4176,6 +5325,17 @@ class ActRunner:
                                "read the screen - not acting")
             return False
         if seen != "quest_complete":
+            # **A RETURN DOES NOT NEED THE BANNER, and waiting for one that
+            # will never come is how a won raid gets stranded.** The banner is
+            # a modal shown once, at the moment the objective completes; press
+            # Continue and it is gone for good. The HUD's abandon-quest
+            # control is the standing exit and it works from any room out of
+            # combat, so that is what a RETURN uses when the modal is not up.
+            #
+            # CONTINUE still needs the banner, because "continue" is only ever
+            # an answer TO the banner -- there is no other control it means.
+            if want == "return":
+                return self._leave_raid(seen)
             if want:
                 self._say_once(
                     f"raid-end-wrongscreen-{seen}",
@@ -4199,13 +5359,36 @@ class ActRunner:
             # on purpose: that rule is about a map with nothing left on it.
             # Here the bridge has already decided it wants to be somewhere,
             # and of the two buttons only RETURN forfeits anything.
-            if not getattr(advice, "next_step", ""):
+            # **THE BANNER IS THE GAME SAYING THE OBJECTIVE IS MET, so the
+            # raid-end pricing is what should answer it.** `run.py` carries
+            # that verdict as `raid_end_priced` precisely for this moment: it
+            # weighs what is still reachable against the party's stress and
+            # afflictions, which is the question, and it exists whether or
+            # not the bridge's own `RoutePlan.targets` has emptied yet.
+            #
+            # The old fallback was "CONTINUE, because the route wants
+            # somewhere to go", which is not a decision about the raid at
+            # all -- the route always wants somewhere until the map is
+            # covered, and DD finishes an explore quest at 90% of rooms
+            # (`quest.types.json`). So it continued into a won raid with an
+            # afflicted party as readily as with a fresh one.
+            want = getattr(advice, "raid_end_priced", "")
+            if want:
+                self._say(f"  [act] [raid] the quest is complete and the "
+                          f"raid layer prices this as {want.upper()}")
+            elif getattr(advice, "next_step", ""):
+                # No priced verdict (an older caller, or no route): fall back
+                # to continuing. CONTINUE is the recoverable direction --
+                # the abandon-quest banner top left still ends the raid
+                # whenever the bridge is ready, which `plan_leave_raid`
+                # sends. RETURN forfeits everything still on the map.
+                want = "continue"
+                self._say("  [act] [raid] the quest is complete and the route "
+                          "still wants " + str(getattr(advice, "next_step", "")) +
+                          " - CONTINUE, because the abandon-quest banner still "
+                          "ends the raid whenever we are ready")
+            else:
                 return False
-            want = "continue"
-            self._say("  [act] [raid] the quest is complete and the route "
-                      "still wants " + str(getattr(advice, "next_step", "")) +
-                      " - CONTINUE, because only the other button throws "
-                      "something away")
         if not self.armed:
             self._say_once("raid-end-unarmed",
                            f"  [act] would {want.upper()} from the raid "
@@ -4264,6 +5447,15 @@ class ActRunner:
             return
         self._say(f"  [act] [route] party order is {'>'.join(order)}, "
                   f"want {'>'.join(want)} - swapping")
+        # Kept apart from the per-fight before/after pair, which the next
+        # fight overwrites: this is the frame where the order is still wrong
+        # AFTER the Default Party order click (2026-09-28 evidence).
+        self._bank_frame("_party_order_wrong.png", "still out of order after "
+                         "the Default Party order click")
+        # The first few cases are KEPT (the per-fight pair is overwritten by
+        # the next fight): the last one banked on 2026-09-28 was the
+        # quest-complete banner, which says nothing about the ordinary case.
+        self._keep_party_order_evidence()
         for rank in range(len(want)):
             order = self._party_order()
             if not order or order == want:
@@ -4351,6 +5543,9 @@ class ActRunner:
         if not self._focused_or_wait():
             return
         self._say(f"  [act] [loot] SPACE (take all) after {after}")
+        # What SPACE met, for `_curio_landed`: "taken", "left" (the rest was
+        # declined because it did not fit), or "" for no sign of a window.
+        self._loot_outcome = ""
         plan = InputPlan((Step("key", vk=VK_SPACE, label="take all loot"),),
                          "loot", "clear the loot window")
         before = self._save_sig()
@@ -4360,6 +5555,7 @@ class ActRunner:
         self.stats["acted"] += 1
         if before is not None and self._wait_for_save_change(before):
             self._say("  [act] [loot] taken - confirmed by the save")
+            self._loot_outcome = "taken"
             return
         self._make_room()
 
@@ -4416,6 +5612,8 @@ class ActRunner:
         # Only a pack POSITIVELY read as under half skips the click. "Could not
         # read it" is not that: it is the case with no information at all, and
         # a dialog nobody dismissed strands the run, so it still goes.
+        self._bank_frame("_no_room.png", "what SPACE left on screen when it "
+                         "did not move the save - a loot window, or nothing")
         if not self._dismiss_modal():
             return self._pause("could not dismiss the 'no room' modal")
         if pack is None:
@@ -4447,7 +5645,55 @@ class ActRunner:
             return self._pause("the discard did not register - SHIFT-CLICK may "
                                "not survive this backend")
 
+        # **Surplus provisions make room for loot.** Only what the raid
+        # layer's own reserve says the rest of the map will never use.
+        from bridge.inventory import plan_surplus_discard
+        reserve = self.item_reserve() if callable(self.item_reserve) else None
+        if reserve is None:
+            self._say("  [act] [pack] no provision reserve from the raid layer "
+                      "- not trading supplies for loot")
+        else:
+            spare = plan_surplus_discard(pack, reserve)
+            if spare is not None:
+                self._say(f"  [act] [pack] DISCARD slot {spare.slot} "
+                          f"({spare.label}) - {spare.why}")
+                if self._discard_slot(spare):
+                    return self._retake_loot()
+            else:
+                held = ", ".join(f"{s.id or s.type} x{s.amount}" for s in pack
+                                 if s.type in ("supply", "provision"))
+                self._say(f"  [act] [pack] no supply stack is wholly surplus "
+                          f"(reserve {dict(reserve)}; held {held})")
+
         self._abandon_or_pause(pack)
+
+    def _keep_party_order_evidence(self, keep: int = 5) -> None:
+        """Copy this fight's before/after/wrong frames to numbered names, for
+        the first `keep` out-of-order cases of the run. Best effort."""
+        n = getattr(self, "_party_order_kept", 0)
+        if n >= keep:
+            return
+        self._party_order_kept = n + 1
+        try:
+            import shutil                                 # noqa: PLC0415
+            base = Path(__file__).resolve().parent.parent / "captures"
+            for tag in ("before", "after", "wrong"):
+                src = base / f"_party_order_{tag}.png"
+                if src.exists():
+                    shutil.copyfile(src, base / f"_party_order_{n + 1}_{tag}.png")
+        except Exception:                                 # noqa: BLE001
+            pass
+
+    def _fed_again_after_fight(self) -> None:
+        """**"Full" lasts until the next completed fight** (Fran, 2026-09-28:
+        "if you complete a combat you can re-feed your hero"). Both the
+        refused-portion mark and the portions counted toward
+        `MAX_FOOD_BEFORE_FULL` start over when a fight ends."""
+        self._food_full = set()
+        sent = getattr(self, "_provisions_sent", None)
+        if sent:
+            self._provisions_sent = {k: n for k, n in sent.items()
+                                     if k[2] != "food"}
 
     def _merge_stacks(self, pack) -> bool:
         """Combine split stacks by dragging. True when a slot was freed.
@@ -4521,7 +5767,19 @@ class ActRunner:
         only discard chaff would still stop at nineteen of them.
         """
         from bridge.inventory import describe
-        if self.full_pack != "abandon":
+        if self.full_pack == "swap":
+            # Trade the cheapest stack of value for the loot, then walk on
+            # if nothing in the pack is cheap enough -- never pause, because
+            # an unattended run has nobody to hand over to.
+            from bridge.inventory import plan_value_discard
+            cheap = plan_value_discard(pack)
+            if cheap is not None and not getattr(self, "_swapped_this_window", False):
+                self._say(f"  [act] [pack] DISCARD slot {cheap.slot} ({cheap.label}) - {cheap.why}")
+                self._swapped_this_window = True
+                if self._discard_slot(cheap):
+                    return self._retake_loot()
+            self._swapped_this_window = False
+        if self.full_pack not in ("abandon", "swap"):
             self._say("  [act] [pack] nothing in the pack is free to discard")
             return self._pause(
                 "the loot did not all fit and nothing in the pack is free to "
@@ -4552,6 +5810,7 @@ class ActRunner:
         and the next step's own check is what catches a miss.
         """
         pt = self.resolved.modal_ok
+        self.pack_full_seen += 1
         self._say(f"  [act] [pack] OK on the 'no room' modal at {pt}")
         plan = InputPlan((Step("click", screen=pt, label="OK"),),
                          "pack", "dismiss the full-inventory modal")
@@ -4898,6 +6157,13 @@ class ActRunner:
         # and `W` is what does it -- confirmed in play: "w solo va hacia cofres
         # o de pasillo a sala". Leaving a room is NOT this; that is the map,
         # and `plan_room` refuses it before we ever get here.
+        # **THE DOOR OPENS FOR THE FRONT TWO HEROES.** Fran, 2026-09-26: at the
+        # last tile of a hallway the door is drawn among the party, and W only
+        # opens it when one of the two FRONT heroes stands at it -- pinned at
+        # the far end it sits at the back rank. Measured live the same day in
+        # coBC: W at the end did nothing, and A-steps of 0.25 s opened it at
+        # 1.0 s. So the first back-off is ~two hero widths (0.75 s), then
+        # quarter-second steps (`DOOR_BACKOFF`).
         for attempt in range(1, DOOR_TRIES + 1) if in_a_room(target_area) else ():
             # **A STEP BACK BEFORE EVERY RETRY, not just another press.** The
             # stall check reads `areatile`, which only ticks at a tile
@@ -4912,7 +6178,8 @@ class ActRunner:
                 self._say(f"  [act] [route] the door did not open - the party "
                           f"may have walked past it, stepping back and trying "
                           f"again ({attempt}/{DOOR_TRIES})")
-                nudge = InputPlan((Step("key", vk=back, hold=WALK_HOLD,
+                hold = DOOR_BACKOFF[min(attempt - 2, len(DOOR_BACKOFF) - 1)]
+                nudge = InputPlan((Step("key", vk=back, hold=hold,
                                         label=f"back off {'D' if backtracking else 'A'}"),),
                                   "route", f"back onto the door of {target_area}")
                 if not self.actuator.execute(nudge):
@@ -4939,7 +6206,13 @@ class ActRunner:
                 # and nothing else. It has to come before the door watch,
                 # because a panel is modal and the party will never leave
                 # `from_area` while it stands.
-                if self._work_obstacle_panel(from_area):
+                # Only where the SAVE puts an obstacle (tile content 4).
+                # Live 2026-09-26 a W at the far end of coBC -- which holds
+                # none -- met some other panel, this read it as an obstacle,
+                # clicked the hand and returned, and the back-off below never
+                # ran: three iterations stood at that door.
+                if (self._corridor_has_obstacle(from_area)
+                        and self._work_obstacle_panel(from_area)):
                     return
                 # Walk THROUGH a door, not just press at it. Entering a room
                 # is an animation and DD writes the save at the end of it, so
@@ -5009,7 +6282,8 @@ class ActRunner:
         except (OSError, AttributeError):
             return None
 
-    def _send_and_confirm(self, plan, attempts: int = 0) -> bool:
+    def _send_and_confirm(self, plan, attempts: int = 0,
+                          ack_timeout: Optional[float] = None) -> bool:
         """Send, then prove it landed; retry if it did not.
 
         `attempts` overrides `SEND_ATTEMPTS` for callers whose plan STALES.
@@ -5071,7 +6345,7 @@ class ActRunner:
                 self._say("  [act] sent (no save to confirm against)")
                 return True
             sent = time.perf_counter()
-            if self._wait_for_save_change(baseline, TURN_ACK_TIMEOUT):
+            if self._wait_for_save_change(baseline, ack_timeout or TURN_ACK_TIMEOUT):
                 extra = "" if attempt == 1 else f" (attempt {attempt})"
                 # The latency is printed because the timeout was set from a
                 # corpus of HUMAN play, and one run of these numbers replaces
@@ -5079,7 +6353,10 @@ class ActRunner:
                 self._say(f"  [act] sent{extra} - confirmed by the save after "
                           f"{time.perf_counter() - sent:.1f}s")
                 return True
-            self._say(f"  [act] no save change in {TURN_ACK_TIMEOUT:.0f}s - the "
+            # The wait ACTUALLY used, not the default: the torch waits 2 s and
+            # the log said 15, which inflated a pace measurement 2026-09-28.
+            self._say(f"  [act] no save change in "
+                      f"{(ack_timeout or TURN_ACK_TIMEOUT):.0f}s - the "
                       f"input did not land (attempt {attempt}/{tries})")
             if attempt == 1:
                 # At the FIRST failure, not the last: by the third the
@@ -5176,6 +6453,7 @@ class ActRunner:
         suppress a legal skill for the rest of the fight, which is worse than
         the bug this feeds.
         """
+        self._stuck_rotations = 0          # a turn landed: the fight moves
         if self.on_played is None:
             return
         skill_id = getattr(update, "skill_id", "")
@@ -5201,6 +6479,31 @@ class ActRunner:
             return
         self._said.add(tag)
         self._say(message)
+
+    def explain_again(self) -> None:
+        """Forget what has already been said, so the next poll re-explains.
+
+        **A refusal that repeats forever is the one case `_say_once` gets
+        wrong.** Its job is to stop a turn's refusal printing several times a
+        second while the poll loop republishes it, and for a turn that
+        eventually gets played that is exactly right. For a raid that is STUCK
+        it is the opposite: the actuator keeps refusing for the same reason
+        every 25 s and says nothing, so the log shows room plans with no
+        `[act]` line under them at all and reads as though the actuator had
+        died.
+
+        Live 2026-09-20, the last thing the overnight loop did before it was
+        stopped: six identical room plans, the stall line firing correctly --
+        and the actual cause, `the game offers no move at or near rooE - not
+        clicking blind`, sixty lines earlier and looking unrelated. The stall
+        report said "none of them has an input the game accepts from here",
+        which is true and names nothing.
+
+        Called once, at the give-up bound, so the noise `_say_once` exists to
+        prevent does not come back: the next poll explains itself in full and
+        then goes quiet again.
+        """
+        self._said.clear()
 
     def _approve(self) -> bool:
         """Ask, on stdin, before a combat turn. `--confirm` only.
@@ -5261,7 +6564,32 @@ def choose_backend(win, prefer: str = DEFAULT_BACKEND) -> Backend:
     it is the only path that leaves the cursor alone -- but nothing should
     choose it to click with.
     """
-    return BACKENDS.get(prefer, BACKENDS[DEFAULT_BACKEND])(win)
+    backend = BACKENDS.get(prefer, BACKENDS[DEFAULT_BACKEND])(win)
+    release_movement_keys(win)
+    return backend
+
+
+def release_movement_keys(win) -> bool:
+    """Send a key-UP for every walking key. Harmless when none is held.
+
+    A bridge killed between a walk's key-down and its key-up leaves the game
+    believing the key is still held, and the party walks on its own the
+    moment nothing else is pressed. Live 2026-09-25: after a run was stopped
+    mid "walking A", every `D` press was undone as soon as it ended and the
+    party slid back to the door -- which a fresh bridge would read as its own
+    input failing. Real windows only: a stand-in has no game to release.
+    """
+    hwnd = getattr(win, "hwnd", None)
+    if not isinstance(hwnd, int) or not hwnd or not user32.IsWindow(hwnd):
+        return False
+    sent = 0
+    for vk in (VK_A, VK_D, VK_W, 0x25, 0x26, 0x27, 0x28):   # + the arrows
+        scan = user32.MapVirtualKeyW(vk, MAPVK_VK_TO_VSC)
+        up = INPUT(type=INPUT_KEYBOARD,
+                   u=_INPUTunion(ki=KEYBDINPUT(wVk=vk, wScan=scan,
+                                               dwFlags=KEYEVENTF_KEYUP)))
+        sent += user32.SendInput(1, ctypes.byref(up), ctypes.sizeof(INPUT))
+    return sent > 0
 
 
 # ── CLI ──

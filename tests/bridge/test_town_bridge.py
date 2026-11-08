@@ -177,3 +177,16 @@ def test_a_partial_enemy_line_still_identifies_the_bracket(store):
 def test_no_enemies_means_no_inference(store):
     assert infer_zone_and_tier(store, []) is None
     assert infer_zone_and_tier(store, ["not_a_monster"]) is None
+
+def test_a_dead_hero_is_not_on_the_roster():
+    """`roster.status` 3 is a hero who died; the file keeps them. Captured
+    2026-09-23 from profile_0 with eight dead: 43 records, 35 alive -- and 35
+    is exactly what the estate-map list drew."""
+    snap = REPO / "archive" / "traces" / "roster_dead_20260923" / "persist.roster.json"
+    if not snap.exists():
+        pytest.skip("no captured roster with dead heroes")
+    heroes = _read_roster(snap, load_resolve_thresholds())
+    guids = {h.guid for h in heroes}
+    assert len(heroes) == 35
+    assert not guids & {254, 255, 256, 260}
+

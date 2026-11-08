@@ -84,6 +84,7 @@ from bridge.route import Quest, plan_route, read_position, read_quest
 from bridge.lootplan import plan_loot
 from bridge.seed import SAVE_STAT_GUARD_MARKER, SeedError
 from bridge.torchlight import advise_from_live as advise_torch_live
+from bridge.torchlight import RADIANT_FLOOR, torches_to_restore
 from bridge.torchlight import describe as describe_torch
 from data.rules import RulesLoader
 from engine.combat_engine import IN_COMBAT_PROVISION_IDS
@@ -125,6 +126,37 @@ MAX_TURN_SKIPS = 3
 #: a run of enemy turns (measured at 17 s of silence between two hero turns),
 #: so an ordinary fight never trips it.
 STUCK_SECONDS = 25.0
+#: The same heartbeat OUT of combat, where it only fires on a genuinely frozen
+#: room (walking and looting write the save). Measured 2026-09-28 over 40 raid
+#: logs: 9.5 h of 15.2 h was out of combat and the median gap between room
+#: plans was exactly 25 s -- the bridge idling until this timer fired.
+ROOM_STUCK_SECONDS = 12.0
+# How many room re-plans in a row, on a save that has not moved AT ALL, before
+# the loop says so in a line an outer runner can act on.
+#
+# **The thing that reports a stall was defeating the thing that detects one.**
+# `tools/overnight.py` calls a phase stalled when its log stops growing for
+# 180 s -- and `note_room_stuck` prints a full room plan every 25 s, so a
+# dungeon the bridge could not leave looked like the busiest phase of the
+# night. Measured live 2026-09-20: the raid layer advised RETURN, no actuator
+# existed for it, and the iteration re-planned the identical room for the
+# whole 900 s allowance while printing continuously.
+#
+# 12 is ~144 s of a completely unwritten save at the 12 s room heartbeat
+# (`ROOM_STUCK_SECONDS`; it was 6 at 25 s), which is far longer than any
+# animation and short of the 180 s the outer loop already allows. The recovery
+# itself stays UNBOUNDED -- `note_room_stuck` keeps re-planning after this,
+# exactly as its docstring says it must. This only makes the situation
+# SAYABLE; what to do about it is the caller's.
+ROOM_STUCK_GIVE_UP = 12
+#: Stuck re-plans after which a loot stop the raid is waiting on is given up.
+LOOT_HOLD_GIVE_UP = 6
+#: 'no room' modals after which a met objective means go home.
+PACK_FULL_RETURN = 2
+#: Area changes the loot walk may steer for one goal before giving it up.
+LOOT_GOAL_MAX_PLANS = 6
+#: Emitted once per stall. `tools/overnight.py` watches for it.
+ROOM_STUCK_LINE = "-- the dungeon is not responding --"
 
 
 def _family(kind: str) -> str:
@@ -146,7 +178,13 @@ def advised_kind(engine, action) -> str:
         return "retreat"
     actor = next((h for h in engine.heroes if h.id == action.hero_id), None)
     tier = actor.skill_tier if actor is not None else 4
-    if engine._is_ally_skill(sid):
+    # **A SELF-cast is not an attack.** The Abomination's Absolution heals and
+    # relieves stress on the caster; `_is_ally_skill` does not count a
+    # self-target, so it fell through to "attack" and the ledger reported
+    # "DIFFER advised attack, played heal" seven times in two raids
+    # (2026-09-24) for turns that were played exactly as advised.
+    self_cast = action.target_id is None or action.target_id < 0
+    if engine._is_ally_skill(sid) or self_cast:
         sd = engine.get_skill_data(sid, level=tier)
         return "heal" if (sd is not None and sd.heal_min is not None) else "support"
     return "attack"
@@ -487,6 +525,12 @@ class Board:
         )
 
 
+
+#: P(the whole party dies) above which the survival layer may pull the party
+#: out of a FIGHT. Fran, 2026-09-23: *"unless the probability exceeds a really
+#: high threshold of wiping"*. Everything below leaves the fight to the model.
+FIGHT_RETREAT_WIPE = 0.8
+
 @dataclass(frozen=True)
 class Update:
     """One structured event, for a front-end that is not a terminal.
@@ -521,6 +565,9 @@ class Update:
     #: heropanel.py` needs both: the first to compare against, the second as
     #: the pool it matches within.
     actor_class: str = ""
+    #: A provision for the acting hero before the skill: `(item, why)`.
+    #: Items are FREE actions in a fight (measured live 2026-09-26).
+    battle_item: tuple = ()
     #: The SURVIVAL layer says leave. Not the policy's opinion -- `advise_retreat`
     #: prices the whole rest of the dungeon and applies the death floor, and its
     #: verdict had no way to reach the actuator at all. See `plan_battle`.
@@ -847,7 +894,19 @@ class RoomAdvice:
     # thing the map will not take. Empty in a corridor, where walking is `A`/`D`
     # and no map is involved.
     next_room: str = ""
+    raid_end_priced: str = ""    # what `_raid_end` WOULD say, objective or not
     torch: str = ""              # "relight" | "shutdown"; "hold" never lands here
+    # **HOW MANY TORCHES THE RELIGHT NEEDS, and it is not one.** One torch
+    # restores 25 (`torchlight.TORCH_RESTORE`), so 0 -> the 76 radiant floor
+    # is FOUR presses of `T`. The actuator sent exactly one and the field to
+    # say otherwise did not exist, so a snuffed party walked into the next
+    # fight at 25 or less with the log reporting a relight had been sent.
+    # Fran, 2026-09-20: *"try to never combat on under 75 torch, it started a
+    # combat at 0 torch"*.
+    #
+    # Capped by what the pack holds, so it never promises light the party
+    # cannot buy, and 0 whenever the action is not a relight.
+    torch_count: int = 0
     curio_area: str = ""
     curio_id: str = ""
     curio_action: str = ""       # "use" | "interact"
@@ -871,11 +930,15 @@ class RoomAdvice:
     #: of which this module decides.
     loot_worth: float = 0.0
     dark_battles: float = 0.0
+    #: Provisions to use here, each on its trigger (`bridge/provision_use.py`):
+    #: `((hero guid, rank, item, why), ...)`.
+    provisions: tuple = ()
 
     @property
     def empty(self) -> bool:
         return not (self.next_step or self.torch or self.curio_action
-                    or self.camp or self.raid_end or self.curio_defer)
+                    or self.camp or self.raid_end or self.curio_defer
+                    or self.provisions)
 
 
 @dataclass(frozen=True)
@@ -1148,6 +1211,41 @@ def judge_room(pending: RoomPending, after: RoomBoard) -> list[tuple[str, str, s
 
 # ── the out-of-combat block ──
 
+def _step_toward(dungeon, here: str, target: str) -> tuple[str, str]:
+    """`(first area to enter, the room it leads to)` on the shortest walk from
+    room `here` to `target` (a room, or a corridor between two rooms)."""
+    try:
+        from bridge.route import _all_pairs            # noqa: PLC0415
+        graph = dungeon.graph()
+        if here not in graph:
+            # In a corridor: head for whichever end is nearer the target.
+            ends = [r for r, nb in graph.items() if here in nb.values()]
+            if target in ends:
+                return target, target
+            allp = _all_pairs(dungeon)
+            best = min((len(allp.get(e, {}).get(target, [])) or 99, e)
+                       for e in ends) if ends else (99, "")
+            return (best[1], best[1]) if best[1] else ("", "")
+        pairs = _all_pairs(dungeon).get(here, {})
+        if target in pairs:
+            walk = pairs[target]
+        else:
+            ends = [r for r, nb in dungeon.graph().items()
+                    if target in nb.values()]
+            if here in ends:
+                other = next((r for r in ends if r != here), "")
+                return target, other
+            reach = [pairs[r] + [target] for r in ends if r in pairs]
+            walk = min(reach, key=len) if reach else []
+        if len(walk) < 2:
+            return "", ""
+        step = walk[1]
+        room = next((a for a in walk[1:] if a.startswith("roo")), "")
+        return step, room
+    except Exception:                                  # noqa: BLE001
+        return "", ""
+
+
 def _loot_outstanding(loot, abandoned=None, prefer=None):
     """The best thing the loot plan still means to collect, or None.
 
@@ -1202,6 +1300,44 @@ def _loot_outstanding(loot, abandoned=None, prefer=None):
     return held or best
 
 
+def _dark_pays_here(loot, here, next_step) -> bool:
+    """Does the loot plan want darkness at the party's feet, or one step on?
+
+    Fran's rule, and it is about the moment right after a won fight: *"when
+    you beat a battle and immediately after there is a loot curio -- next box
+    on a hallway, or the curio on the same room, or 1st box on the next
+    hallway -- you should keep the torch low for that part of the dungeon"*.
+
+    **The stops are walked IN ORDER, and that is the whole guard.** The first
+    version asked only "is there a dark pickup nearby", and the bridge oracle
+    caught what that does: in `coHM` the next dark stop was the heirloom chest
+    in `rooH`, on the far side of a FIGHT in `rooH`, so the rule held the
+    light and walked the party into a dim combat. Fran's other standing rule
+    -- *"try to never combat on under 75 torch"* -- is exactly what that
+    breaks, and `lootplan`'s hard torch floor is built on it.
+
+    So a `fight` ends the scan, and so does the plan's own `relight`: both are
+    the plan saying the light is wanted before anything else it has queued.
+    Only a dark `take`/`defer` reached BEFORE either of them counts.
+
+    `skip` is excluded on the way past -- a stop the plan refuses is loot
+    nobody is going to collect, so it cannot justify holding anything.
+    """
+    if loot is None:
+        return False
+    near = {a for a in (here, next_step) if a}
+    if not near:
+        return False
+    for stop in getattr(loot, "stops", ()):
+        if stop.action in ("fight", "relight"):
+            return False
+        if stop.action not in ("take", "defer"):
+            continue
+        if stop.area in near and stop.torch < RADIANT_FLOOR:
+            return True
+    return False
+
+
 @dataclass
 class Layers:
     """The six dungeon layers, held together so the loop has one thing to call."""
@@ -1216,6 +1352,12 @@ class Layers:
     #: so a re-plan cannot turn the party round. Cleared when it is collected
     #: or priced out -- see `_loot_outstanding`.
     loot_goal: tuple = ()
+    #: `() -> int`, the actuator's count of 'no room' modals this raid.
+    pack_full: object = None
+    #: Set by a stuck re-plan: loot is no longer a reason to stay this raid.
+    loot_off: bool = False
+    #: Areas the loot walk steered through per goal (`LOOT_GOAL_MAX_PLANS`).
+    _goal_plans: dict = field(default_factory=dict)
 
     @staticmethod
     def _raid_end(state: LiveState, plan, mine, loot=None,
@@ -1307,6 +1449,10 @@ class Layers:
         priced_out = {(s.area, s.curio_id) for s in
                       (loot.stops if loot is not None else ())
                       if s.action == "skip" and s.curio_id}
+        # ...and so is one the actuator or a loot bound has GIVEN UP on (live
+        # 2026-09-27: an heirloom chest that did not answer three presses
+        # held the raid as a +0-move detour).
+        priced_out |= {tuple(g) for g in (abandoned or ()) if len(g) == 2}
         live_detours = [d for d in plan.detours
                         if not any(a == d.area_id and c and c in d.what
                                    for a, c in priced_out)]
@@ -1398,6 +1544,9 @@ class Layers:
             if loot is not None:
                 advice = replace(advice, loot_worth=loot.value.worth(),
                                  dark_battles=loot.expected_dark_battles())
+                # The retreat bill reads this: leaving forfeits it.
+                if getattr(self, "advisor", None) is not None:
+                    self.advisor.loot_ahead_gold = float(loot.value.worth())
                 out.append(f"LOOT    {loot.value.line()} still on the map; "
                            f"{loot.expected_dark_battles():.2f} fights in the "
                            f"dark expected")
@@ -1426,6 +1575,29 @@ class Layers:
                 goal = _loot_outstanding(loot, self.abandoned, self.loot_goal)
                 self.loot_goal = ((goal[0].area, goal[0].curio_id)
                                   if goal else ())
+                # **A goal the LOOT WALK has steered for `LOOT_GOAL_MAX_PLANS`
+                # area changes without being taken is given up.** Live
+                # 2026-09-27: a knife rack priced at torch 0 kept the party
+                # pacing rooD <-> coAD at torch 86 -- the save moved every
+                # step, so no stall bound ever fired, and nothing was ever
+                # going to darken the torch. Counted only while the loot walk
+                # is what moves the party (the route has no step of its own),
+                # and only on a NEW area: the replay oracle caught the first
+                # version abandoning a curio the route was still walking to.
+                if self.loot_goal and not advice.next_step:
+                    seen = self._goal_plans.setdefault(self.loot_goal, [])
+                    if not seen or seen[-1] != here:
+                        seen.append(here)
+                    n = len(seen)
+                    if n > LOOT_GOAL_MAX_PLANS:
+                        if self.abandoned is None:
+                            self.abandoned = set()
+                        self.abandoned.add(self.loot_goal)
+                        out.append(f"LOOT    gave up {goal[0].curio_id} in "
+                                   f"{goal[0].area}: {n - 1} areas walked "
+                                   f"for it without taking it")
+                        self.loot_goal = ()
+                        goal = None
                 if not advice.next_step and goal:
                     # **The step AFTER where the party is, not the head of
                     # the walk.** This was a filter -- every area except
@@ -1445,12 +1617,41 @@ class Layers:
                     walk = list(loot.walk)
                     at = len(walk) - 1 - walk[::-1].index(here)                         if here in walk else -1
                     ahead = [a for a in walk[at + 1:] if a != here]                         if at >= 0 else [a for a in walk if a != here]
+                    # A walk ahead that never reaches the goal's area is not
+                    # a walk to the goal (live 2026-09-27: "NEXT -> rooD (for
+                    # the loot)" with the chest in rooA, the party turning
+                    # round mid-corridor).
+                    if ahead and goal[0].area not in ahead                             and goal[0].area != here:
+                        ahead = []
                     if ahead:
                         room = next((a for a in ahead if a.startswith("roo")),
                                     "")
                         advice = replace(advice, next_step=ahead[0],
                                          next_room=room)
                         out.append(f"NEXT -> {ahead[0]} (for the loot)")
+                    elif goal[0].area != here:
+                        # **The walk is over and the stop is BEHIND the
+                        # party** (live 2026-09-27: an heirloom chest in the
+                        # adjacent rooA, a knife rack in the corridor just
+                        # walked). A TAKE is walked back to; a DEFER was a
+                        # promise about the walk home, and there is no walk
+                        # left to keep it on, so it is given up.
+                        if goal[0].action == "defer":
+                            if self.abandoned is None:
+                                self.abandoned = set()
+                            self.abandoned.add(self.loot_goal)
+                            self.loot_goal = ()
+                            out.append(f"LOOT    gave up the deferred "
+                                       f"{goal[0].curio_id} in {goal[0].area}: "
+                                       f"no walk left to take it on")
+                        else:
+                            step, room = _step_toward(dungeon, here,
+                                                      goal[0].area)
+                            if step:
+                                advice = replace(advice, next_step=step,
+                                                 next_room=room)
+                                out.append(f"NEXT -> {step} (back for the "
+                                           f"{goal[0].curio_id})")
             if curio_lines and curio_lines[0].startswith("CURIO"):
                 headline = curio_lines[0][8:].split("  - ")[0].strip()
             # Only a curio the party is STANDING on is a decision due now, and
@@ -1476,18 +1677,87 @@ class Layers:
                                      curio_id=c.curio_id, curio_action=c.action,
                                      curio_item=c.item or "")
                     break
-            if plan is not None and not plan.targets:
+            if plan is not None:
                 choice, why = self._raid_end(state, plan, mine, loot,
                                              self.abandoned, self.loot_goal)
-                advice = replace(advice, raid_end=choice)
-                out.append(f"RAID    {choice.upper()}  - {why}")
+                full = self.pack_full() if callable(self.pack_full) else 0
+                if choice == "continue" and self.loot_off and not plan.targets:
+                    choice, why = "return", (
+                        "objective met, and the dungeon stopped responding "
+                        "while the party was looting - going home")
+                if choice == "continue" and full >= PACK_FULL_RETURN:
+                    choice, why = "return", (
+                        f"objective met and the pack is full ({full} 'no "
+                        f"room' this raid) - loot here cannot come home")
+                if not plan.targets:
+                    # The bridge's OWN reading of "the objective is met", and
+                    # it is the one that arms the actuator.
+                    advice = replace(advice, raid_end=choice)
+                    out.append(f"RAID    {choice.upper()}  - {why}")
+                else:
+                    # **THE GAME FINISHES AN EXPLORE QUEST BEFORE THE MAP IS
+                    # COVERED, and the bridge had no answer for that window.**
+                    # `quest.types.json` gives `explore_all_rooms` a
+                    # `percentage` of 0.9, so `Quest Complete!` is drawn with
+                    # rooms still unvisited -- live 2026-09-06, 7 of 8 -- while
+                    # `RoutePlan.targets` is still full and this branch never
+                    # ran. `act._end_raid` then had nothing priced to go on and
+                    # fell back to "CONTINUE, because the route wants
+                    # somewhere", which is not a decision about the raid at
+                    # all: it never asked whether anything left was worth the
+                    # risk, or whether the party was in shape to take it.
+                    #
+                    # So the verdict is computed anyway and carried
+                    # separately. It arms nothing -- only the actuator's
+                    # banner branch reads it, and only when the GAME has drawn
+                    # the banner, which is the game stating the objective is
+                    # met. Deriving the 90% rule here instead was rejected:
+                    # one live observation (7 of 8 completing) does not settle
+                    # whether the threshold floors, rounds or ceils, and
+                    # guessing it would move the raid-end decision on every
+                    # map. The banner is the game's own answer and needs no
+                    # arithmetic.
+                    advice = replace(advice, raid_end_priced=choice)
+
+        # **A RELIGHT MUST NOT UNDO THE SNUFF THAT WAS JUST PAID FOR.** The
+        # torch layer is asked before the loot plan exists and cannot see it,
+        # so out of combat it read "below radiant, torches in the pack" and
+        # answered RELIGHT in the very corridor the loot plan had snuffed for.
+        # Fran, 2026-09-20: *"when you beat a battle and immediately after
+        # there is a loot curio -- next box on a hallway, or the curio on the
+        # same room, or 1st box on the next hallway -- you should keep the
+        # torch low for that part of the dungeon"*.
+        #
+        # The rule invents no weight, because `lootplan` has already decided
+        # the light it wants at every stop: a stop priced at a dark torch is
+        # the plan saying "open this one in the dark". Relighting on top of
+        # that spends a torch to make the next pickup worth less, and then
+        # another to put it back.
+        #
+        # Bounded to HERE and the NEXT STEP on purpose. Darkness outside the
+        # killing blow is a straight loss (+12.5 monster accuracy, +25%
+        # damage, +5 crit), so this may only hold the light across the pickups
+        # that are already in front of the party -- never across the map.
+        if (torch is not None and torch.action == "relight"
+                and _dark_pays_here(loot, here, advice.next_step)):
+            torch = replace(torch, action="hold", reason=(
+                "the loot plan wants this pickup dark, and it is here or one "
+                "step away -- relighting would spend a torch to make it worth "
+                "less"))
 
         # Holding the light is the default and the usual answer, so saying it
         # every room is fifteen lines of "carry on". Only a torch decision that
         # is actually available gets printed out of combat.
         if torch is not None and (state.in_battle or torch.action != "hold"):
             if torch.action in ("relight", "shutdown"):
-                advice = replace(advice, torch=torch.action)
+                # `torches_needed` is computed against 100 by `advise_torch`;
+                # what a fight actually requires is clearing the floor, and
+                # buying more light than that spends the pack on nothing.
+                want = (min(int(torch.torches_held),
+                            torches_to_restore(state.torchlight or 0.0,
+                                               RADIANT_FLOOR))
+                        if torch.action == "relight" else 0)
+                advice = replace(advice, torch=torch.action, torch_count=want)
             out.append(f"TORCH   {torch.line()}")
             if torch.action == "shutdown":
                 out.append(f"        +{torch.gold_bonus:.0f}% gold, "
@@ -1512,6 +1782,20 @@ class Layers:
             if camp.should_camp:
                 headline = "CAMP HERE"
                 advice = replace(advice, camp=True)
+        # **Provisions on their triggers** (Fran, 2026-09-25): food under 30%
+        # HP, a cure for the DoT it cures, never what the curios ahead need.
+        from bridge.provision_use import plan_room_provisions  # noqa: PLC0415
+        uses = _safe(plan_room_provisions, state, self.advisor.store,
+                     locals().get("loot"), band, state.remaining_battles) or []
+        # What the curios ahead need is not for a fight either.
+        from bridge.provision_use import room_reserve  # noqa: PLC0415
+        self._item_reserve = _safe(room_reserve, locals().get("loot"),
+                                   len(state.heroes), band,
+                                   state.remaining_battles) or {}
+        if uses:
+            out.extend(u.line() for u, _rank in uses)
+            advice = replace(advice, provisions=tuple(
+                (u.guid, rank, u.item, u.why) for u, rank in uses))
         survival = _safe(self.advisor.survival_note, state)
         if survival:
             out.append("STAY?   " + survival.replace("\n", "\n        "))
@@ -1691,6 +1975,11 @@ class Session:
         # paired decision by decision. `tools/agreement.py` is the only caller
         # and it refuses to report a delta unless the sequences match exactly.
         self.on_score = on_score
+        #: Called once when the room re-planner gives up, so the actuator can
+        #: re-state a refusal `_say_once` has been swallowing. Set by `main`
+        #: to `ActRunner.explain_again`; None in replay and advise mode, where
+        #: there is no actuator to ask.
+        self.on_stall = None
         self._pending: Optional[tuple] = None     # (guid, kind, guid_target, label, Board)
         # WHAT WAS PLAYED, recorded independently of whether there was advice
         # to compare it against. `_pending` is armed only when the advisor
@@ -1703,6 +1992,9 @@ class Session:
         # The wrong-hero recovery. `_battle_sig` is the board state the skip
         # was raised against; the moment any counter moves, the skip retires.
         self._battle_skip = 0
+        #: A fight has been SEEN this raid, won or not. `battles_completed`
+        #: does not move on a combat retreat, and see `_fought` at the gate.
+        self._fought = False
         #: The class `bridge/heropanel.py` says the game is asking, when it
         #: could read one. A hypothesis about ONE stuck position, exactly like
         #: the skip, so it retires with it -- a stale class would steer a
@@ -2067,6 +2359,22 @@ class Session:
         self._battle_torch(state)
         self.publish(self._battle_update(state, block, enemies_first, key))
 
+    def abandon_loot_goal(self) -> None:
+        """Give up the loot stop the raid layer is holding the party for."""
+        # **Stuck while looting ends the looting.** One goal at a time was
+        # too slow: live 2026-09-27 a raid with the objective met gave up a
+        # sack, then a pack, and the loop's own stall bound killed the
+        # iteration first -- three times, and the idle guard stopped the night.
+        self.layers.loot_off = True
+        goal = tuple(getattr(self.layers, "loot_goal", ()) or ())
+        if not goal:
+            return
+        if self.layers.abandoned is None:
+            self.layers.abandoned = set()
+        self.layers.abandoned.add(goal)
+        self.emit(f"-- giving up {goal[1] or 'loot'} in {goal[0]}: the raid "
+                  f"was held for it and nothing could act on it --")
+
     def note_room_stuck(self) -> None:
         """The dungeon is frozen out of combat. Plan the room again.
 
@@ -2229,6 +2537,19 @@ class Session:
         # measured and unwired. `plan_battle` prefixes it: snuff, then swing.
         self._snuff_next_turn = True
 
+    def _battle_item(self, state, engine, adv) -> tuple:
+        """`(item, why)` for the acting hero, or (). Never on a look-ahead:
+        an item is sent on the hero's OWN turn, where it is a free action."""
+        from bridge.provision_use import battle_item    # noqa: PLC0415
+        if getattr(adv, "last_provisional", False):
+            return ()
+        use = _safe(battle_item, state, engine, adv.last_action, adv.store,
+                    getattr(self, "_item_reserve", None) or {})
+        if use is None:
+            return ()
+        self.emit(f"  {use.line()}")
+        return (use.item, use.why)
+
     def _battle_update(self, state: LiveState, block: str,
                        enemies_first: int, turn_key: tuple = ()) -> Update:
         """The recommendation as structure, including *why it may be early*.
@@ -2245,6 +2566,7 @@ class Session:
         turn the game was on. The count and the repositioners travel with the
         update now, and a front-end that ignores them is the one at fault.
         """
+        self._fought = True
         adv = self.advisor
         # **THE VERDICT WAS ONLY EVER PROSE.** `advise_retreat` prints
         # "leaving costs ~X gold, staying ~Y - RETREAT" into the block and
@@ -2255,6 +2577,12 @@ class Session:
         # policy's low-ranked option as the survival layer's verdict.
         retreat_advised = any(line.rstrip().endswith("RETREAT")
                               for line in block.splitlines())
+        # **Inside a fight the combat model decides.** Fran, 2026-09-23: keep
+        # the parts separate, and let the dungeon layer overrule a fight only
+        # when the probability of wiping is really high. Below that its
+        # verdict waits for the fight to end and is acted on between fights.
+        if retreat_advised and getattr(adv, "last_wipe_rate", 0.0)                 < FIGHT_RETREAT_WIPE:
+            retreat_advised = False
         if adv.last_action is None or adv.last_engine is None:
             return Update(phase="battle", headline=block.splitlines()[0],
                           detail=block, tally=self.tally,
@@ -2296,6 +2624,7 @@ class Session:
             continues_turn=_continues_turn(adv, adv.last_action),
             confidence=adv.last_confidence,
             snuff_torch=self._take_snuff(),
+            battle_item=self._battle_item(state, engine, adv),
             provisional=bool(enemies_first), enemies_first=enemies_first,
             movers=movers, tally=self.tally, turn_key=turn_key,
             alternatives=tuple(alts))
@@ -2342,8 +2671,49 @@ class Session:
         block, headline, advice = self.layers.block(state, raid_file, map_file,
                                                     dungeon=dungeon, here=here)
         self.emit(block + "\n")
+        # **THE SURVIVAL VERDICT REACHED THE BATTLE PATH AND NOTHING ELSE.**
+        # `advise_retreat` prints "... - RETREAT" into this block for the ROOM
+        # path too, and only the battle Update ever carried it as a flag -- so
+        # a party told to leave kept walking as long as it was between rooms.
+        # Measured 2026-09-21 on Fran's campaign: two heroes left, the
+        # Houndmaster on 4 HP at 100 stress, `advise_retreat` reporting
+        # P(finish intact) 0%, expected deaths 1.50, P(a death) 75% -- and the
+        # bridge routed to the next room. Matched on a line ENDING in the
+        # word, the same way the battle path does it, because the model's own
+        # shortlist carries "alt: RETREAT on self  7%".
+        retreat_advised = any(line.rstrip().endswith("RETREAT")
+                              for line in block.splitlines())
+        # **NOT BEFORE THE FIRST FIGHT.** A retreat on the entrance room is
+        # not a survival decision, it is a verdict on the QUEST CHOICE -- and
+        # by then the provisions are already bought, so acting on it pays for
+        # the expedition twice and banks nothing. Measured 2026-09-22 with
+        # `--survival 12` newly wired in: a fresh party at torch 100 was
+        # handed a 7-fight Warrens cleanse, the rollout read P(finish intact)
+        # 8% and P(a death) 58%, and the loop abandoned four seconds into the
+        # raid -- twice, at about 5,000 gold of provisions each time, taking
+        # the wallet 9,865 -> 5,015 -> 20.
+        #
+        # The gold agreed with pushing on both times (staying ~3,719 against
+        # leaving ~4,778); only the 50% death floor overrode it. That floor
+        # is right about the DANGER and the answer to it belongs at embark,
+        # where the party or the quest can still change. What Fran asked for
+        # is the other case -- *"its stuck on the hunger page or retire from
+        # the dungeon"*, said of a party down to one hero on 3 HP -- and that
+        # one always has fights behind it.
+        # **A fight RETREATED FROM counts.** Measured 2026-09-23: every fight
+        # in a Cove raid ended in a combat retreat, so `battles_completed`
+        # stayed 0, this gate held the raid-level RETREAT back ten times, and
+        # the party walked back into the same fight each time -- +27 stress
+        # per retreat -- until three heroes died of stress at 200.
+        if (retreat_advised and not (state.battles_completed or 0)
+                and not getattr(self, "_fought", False)):
+            retreat_advised = False
+            self.emit("  (retreat advised on the entrance room and NOT sent: "
+                      "that is a verdict on the quest, and the provisions "
+                      "are already paid for)" + chr(10))
         self.publish(Update(phase="room", headline=headline, detail=block,
                             tally=self.tally, room_advice=advice,
+                            retreat_advised=retreat_advised,
                             dungeon=dungeon, area=here or ""))
         self._arm_room(state, here or "", dungeon, advice)
 
@@ -2535,6 +2905,7 @@ def _watch(session: Session, profile: Path, interval: float, duration: float) ->
     # moment. Both feed the stuck check below, which runs on polls that never
     # parse anything and so cannot ask the state.
     stuck_since = None
+    room_stuck_runs = 0
     in_battle = False
     town_sig, town_seen = None, None
     # TRI-STATE. None = we have not looked yet, so the first poll is a
@@ -2579,7 +2950,8 @@ def _watch(session: Session, profile: Path, interval: float, duration: float) ->
             if sig == last_sig and sig is not None:
                 if stuck_since is None:
                     stuck_since = time.time()
-                elif time.time() - stuck_since >= STUCK_SECONDS:
+                elif time.time() - stuck_since >= (
+                        STUCK_SECONDS if in_battle else ROOM_STUCK_SECONDS):
                     stuck_since = time.time()
                     if in_battle and session._battle_skip < MAX_TURN_SKIPS:
                         session.emit(f"-- nothing has moved for "
@@ -2602,13 +2974,57 @@ def _watch(session: Session, profile: Path, interval: float, duration: float) ->
                             + (f" (the panel says {asked})" if asked else "")
                             + " --")
                         session.note_turn_stuck()
+                        # **The fight may be over on screen and not in the
+                        # save.** Measured 2026-09-23: the last enemy died on
+                        # its own turn, the save kept `in_battle` with one
+                        # enemy left, and six minutes went on heroes the game
+                        # was not asking. The actuator looks for enemy bars
+                        # and, finding none, takes one step to make the game
+                        # write the save.
+                        session.publish(Update(
+                            phase="phantom_fight",
+                            headline="the save says a fight; is the screen?"))
                     elif not in_battle and in_raid:
+                        room_stuck_runs += 1
                         session.emit(f"-- nothing has moved for "
-                                     f"{STUCK_SECONDS:.0f}s in the dungeon; "
-                                     f"planning the room again --")
+                                     f"{ROOM_STUCK_SECONDS:.0f}s in the dungeon; "
+                                     f"planning the room again "
+                                     f"({room_stuck_runs}) --")
                         session.note_room_stuck()
+                        # **A LOOT HOLD NOTHING CAN ACT ON IS ABANDONED.**
+                        # Live 2026-09-27: objective met, a knife rack
+                        # DEFERRED in the corridor behind the party "worth
+                        # ~185 gold at torch 0", no walk ahead to reach it
+                        # and no layer to darken the torch -- so the raid
+                        # layer said CONTINUE for 27 minutes while nothing
+                        # moved. After `LOOT_HOLD_GIVE_UP` stuck re-plans the
+                        # held stop joins the given-up set, and the next plan
+                        # prices the raid without it.
+                        if room_stuck_runs % LOOT_HOLD_GIVE_UP == 0:
+                            session.abandon_loot_goal()
+                        # Once, at the bound. Said rather than acted on: the
+                        # re-planning continues, and an unattended runner now
+                        # has something to end the iteration on instead of
+                        # burning its whole allowance on a frozen dungeon.
+                        if room_stuck_runs == ROOM_STUCK_GIVE_UP:
+                            # Ask the actuator to explain itself on the next
+                            # poll. It has been refusing for the same reason
+                            # every 25 s and `_say_once` has been swallowing
+                            # it, so the stall report otherwise names nothing.
+                            if session.on_stall is not None:
+                                try:
+                                    session.on_stall()
+                                except Exception:          # noqa: BLE001
+                                    pass
+                            session.emit(
+                                f"{ROOM_STUCK_LINE} "
+                                f"{ROOM_STUCK_GIVE_UP} room plans in a row on "
+                                f"a save that has not been written once. "
+                                f"Every layer is still deciding; none of them "
+                                f"has an input the game accepts from here.")
             else:
                 stuck_since = None
+                room_stuck_runs = 0
             # `take_replan` is what lets a dispatch happen on a save that
             # has NOT moved. Nothing else can: the wrong-hero recovery is by
             # definition a situation where nobody acted, so the file is
@@ -2892,12 +3308,18 @@ def build_parser() -> argparse.ArgumentParser:
                     help="run a whole capture directory through the loop "
                          "offline and print the marking tally")
     ap.add_argument("--once", action="store_true", help="print one block and exit")
+    ap.add_argument("--fate", action="store_true",
+                    help="read the game's next rolls from the save (DECOMP.md F15) "
+                         "and let them veto the policy's pick; says so in the log")
     ap.add_argument("--log", default=None, metavar="FILE")
     ap.add_argument("--journal", default=None, metavar="FILE",
                     help="structured JSONL beside --log: every marked decision, "
                          "the board it was made on, and every change to the "
                          "Hamlet. Defaults to the --log path with a .jsonl "
                          "suffix; pass a path to override, or 'none' to skip.")
+    ap.add_argument("--no-playbook-heals", action="store_true",
+                    help="do not apply PLAYBOOK 3.2 to the shortlist "
+                         "- let the policy's own heal ranking stand")
     ap.add_argument("--survival", type=int, nargs="?", const=12, default=0,
                     metavar="EPISODES",
                     help="price the retreat by simulating what is left of the "
@@ -2922,7 +3344,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "real cursor, but post-message's CLICK does not "
                          "register in DD (its move does). All paths need the "
                          "game focused.")
-    ap.add_argument("--full-pack", default="pause", choices=["pause", "abandon"],
+    ap.add_argument("--full-pack", default="pause", choices=["pause", "abandon", "swap"],
                     help="when the pack is full and nothing in it is free to "
                          "throw away: 'pause' (default) hands over to you; "
                          "'abandon' closes the loot window and walks on. The "
@@ -2948,7 +3370,9 @@ def main() -> int:
     advisor = Advisor(model,
                       total_combats=args.combats_total or DEFAULT_TOTAL_COMBATS,
                       combats_total_explicit=args.combats_total is not None,
-                      survival_episodes=args.survival)
+                      survival_episodes=args.survival,
+                      playbook_heals=not args.no_playbook_heals,
+                      fate=args.fate)
 
     # The boot phase runs FIRST and everything below is resolved afterwards.
     # `find_profile` returns the most recently touched campaign, and a
@@ -2973,6 +3397,15 @@ def main() -> int:
         # ...and which curios it has stopped trying, so `_raid_end` does not
         # hold the party in the dungeon for something nothing will collect.
         session.layers.abandoned = runner.gave_up_on
+        # ...and whether the pack has refused loot, which ends a loot chase.
+        session.layers.pack_full = lambda: runner.pack_full_seen
+        # ...and the provisions the rest of the raid needs, so a full pack
+        # can make room for loot out of the surplus only.
+        runner.item_reserve = lambda: getattr(session.layers, "_item_reserve",
+                                              None)
+        # ...and when the dungeon stops responding, let it say why rather
+        # than leaving the last refusal sixty lines up the log.
+        session.on_stall = runner.explain_again
     if args.log:
         print(f"logging to {args.log}\n")
 
@@ -3014,6 +3447,8 @@ def main() -> int:
             session.room(state, raid_file, map_file)
         return 0
 
+    from bridge.game_options import warn as warn_options   # noqa: PLC0415
+    warn_options(find_profile(args.profile))
     _watch(session, find_profile(args.profile), args.interval, args.duration)
     print("\n" + session.summary())
     if session.log is not None:

@@ -123,15 +123,17 @@ def test_heirlooms_are_counted_rather_than_sold():
     assert prices[("supply", "shovel")] == 25.0
 
 
-def test_light_burns_six_times_faster_once_it_drops():
-    """`tile_light_loss`, and the reason a plan tops the torch up early."""
+def test_a_new_tile_burns_six_and_a_cleared_one_burns_one():
+    """`tile_light_loss` keys are TILE states, not light levels (corrected
+    2026-09-23 from the live logs: a new corridor tile at torch 100 costs 6,
+    and a re-walked one about 1). The light level does not change either."""
     from data.loot_loader import walk_costs
 
     game = _need_game()
-    assert walk_costs(100.0, game).light_loss == 1.0
-    assert walk_costs(76.0, game).light_loss == 1.0
-    assert walk_costs(75.0, game).light_loss == 6.0
-    assert walk_costs(0.0, game).light_loss == 6.0
+    for torch in (100.0, 76.0, 75.0, 0.0):
+        costs = walk_costs(torch, game)
+        assert costs.light_loss == 6.0, torch
+        assert costs.revisit_light_loss == 1.0, torch
 
 
 def test_walking_back_through_a_cleared_corridor_repopulates_it():

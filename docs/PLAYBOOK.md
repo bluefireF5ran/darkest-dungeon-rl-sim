@@ -474,6 +474,25 @@ incumplidas, una puerta ausente pero latente, y una hipótesis mía que era fals
   > y la party necesitando recuperarse): **58.0% atacar**, 27.5% recuperarse. Se
   > amontona sobre una muerte ya asegurada. Causa probable: nada en la recompensa
   > distingue "esta muerte ya está garantizada" de "hay que rematar".
+  >
+  > **CORREGIDO 2026-09-20 — la situación estaba mal medida.** El criterio
+  > empieza por *"En stall"*, y `tools/check_playbook.py` sólo comprobaba
+  > `_party_needs_recovery()`, que es **una** de las tres puertas de
+  > `is_recovery_phase()`: faltaban el número de enemigos vivos y
+  > `_stall_is_still_cheap()`. Así contaba turnos en los que la party **no**
+  > estaba stalleando — y fuera de un stall atacar a un enemigo aturdido es
+  > jugar bien, porque lo que toca es cerrar el combate. Cada uno de esos
+  > turnos se apuntaba como infracción por hacer lo correcto. Fran: *"the
+  > recover part only matters when you are stalling properly per se, not
+  > whenever every enemy is stunned."*
+  >
+  > Con la puerta puesta, sobre el checkpoint 1836: la situación pasa de 75
+  > turnos a **56** — 19 ataques correctos estaban contados en contra — y la
+  > recuperación lee **44.6%** frente al 37.3% que se reportó. La infracción
+  > es real y menor de lo dicho. **Las cifras anteriores no son comparables**:
+  > cambió lo que se contaba, no la política. Sigue sin verificar que
+  > `all_stunned` sea buen proxy de "X está aturdido y va a morir a manos de
+  > Y o Z".
 
 - **3.4 Alargar el combate — [CRITERIO]** Sí se hace, **sobre todo con curanderos o
   curanderos de estrés en la composición**.
@@ -593,3 +612,66 @@ Fijado por el jugador, y sustituye a cualquier priorización previa:
 1. **Todo lo de expedición**: provisiones, ruta y scouting, curios, antorcha, gestión de
    inventario en mazmorra, acampada.
 2. **La gestión del pueblo va la última.** Es otro problema distinto.
+
+## 7. Rulings of 2026-09-23 (Fran, reviewing the fact audit)
+
+These supersede anything above that disagrees. Quoted as he wrote them.
+
+**7.1 Retreat.** *"The higher you continue on Darkest dungeon, the more
+expensive the heroes are ... losing a fully upgraded hero can be devastating,
+so knowlegable players will know when to retreat, but a retreat should be on
+average on 20% of dungeons at most, not every one."* Stress is not priced in
+gold: *"the only thing that matters is the survival percent ... we should
+manage an average between, survives and gathers most loot possible"*, and
+*"we shouldn't guide the model towards losing a hero"*. A combat retreat can
+fail (`combat_retreat_chance` 0.70, +0.05 per attempt), and both the simulator
+and the decision should know it. Inside a fight the combat model decides,
+unless a wipe is very likely.
+
+**7.2 Light.** *"Light gives big benefits to heroes, and darkness increases
+loot but makes the combat harder, so if able and we have torches as a common
+community advice is to be always on the max light level, as it makes the game
+more stable and easier to plan around."*
+
+**7.3 Treatment.** *"Only when worth and you have money, its moreso to treat
+over 70 value, and not all the time ... sometimes we have a high stressed
+useful hero, that hero should be treated ... each hero recovers stress on the
+hamlet passively (even more with district) unless it has the antsy trait so
+treating for 20 stress is not useful as you can just pass weeks and play with
+other heroes."*
+
+**7.4 Buildings.** *"improving coach can give you fresh blood for cheap
+expeditions, and level 1 onwards come with all skills, guild/blacksmith is
+important for stats when resolve level increses, sanitarium for long term
+value on quirks and removing diseases, survivalist for camp skills is less
+useful as base version is already fine, and finally the abbey, tavern should
+never be used nor improved as it can make your hero lose trinkets, not worth
+on midgame onwards."*
+
+**7.5 Curios.** *"Loot is always good, buffs are always good, getting stress
+is always bad, lowering stress and healing is good, diseases and dot is bad
+but depends on hero resist, same for traps, quirk change is neutral although
+i would argue is slightly bad as the pool of quirks that you can get is more
+bad than good."*
+
+**7.6 Who is useless.** *"Just a useless hero, if you get 4-6 heroes each
+week that will be better than him, a hero on the roster doesnt make sense to
+occupy a spot, a stressed 6 resolve fully upgraded hero will always be
+valuable for example."*
+
+**7.7 Provisions.** *"it should come from game averages rather than community
+guidelines, but in this game its preferable to go over than under on
+provisions (we prefer getting extra food to heal rather than eating a
+hunger/shovel check without it) there are curios that can't be opened with
+good odds without that provisions."*
+
+**7.8 Heirlooms.** *"Selling Heirlooms: That would be the worst that you can
+do, trading heirlooms already is not worth on the real game outside the build
+upgrades because they are the only permanent thing on the game campaign."*
+
+**7.9 Evidence.** Sessions where the bridge looped at the first fight or
+retreated on sight carry no information about the economy or the forecast.
+Fran's counterexample: the current raid, with no provisions, cleared several
+fights without a death and is one room from done. The forecast called it
+50% intact with 1.4 expected deaths, so the forecast IS miscalibrated.
+

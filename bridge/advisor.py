@@ -46,6 +46,7 @@ from bridge.rollout import (PartyMember, Rollout, band_for,
 from bridge.route import read_quest
 from bridge.seed import SeedError, build_engine_from_live
 from data.comp_loadout_loader import CompLoadoutLoader
+from data.paths import REPO_ROOT
 from engine import Action
 from env.expedition_sequence_env import EXPEDITION_LENGTH_BANDS, ExpeditionSequenceEnv
 
@@ -80,6 +81,122 @@ RETREAT_THRESHOLD = 0.5
 _MEDIUM = EXPEDITION_LENGTH_BANDS.get("medium", (6, 10)) if isinstance(
     EXPEDITION_LENGTH_BANDS, dict) else (6, 10)
 DEFAULT_TOTAL_COMBATS = (_MEDIUM[0] + _MEDIUM[1]) // 2
+
+
+def checkpoint_width(path) -> Optional[int]:
+    """The observation width a checkpoint was trained at, without loading it.
+
+    Reads the width out of the zip's `data` member -- the same JSON SB3 writes
+    -- rather than constructing a policy, because this runs over every file in
+    `models/` and a real `MaskablePPO.load` is seconds each. Returns None for
+    anything that is not a readable SB3 checkpoint; the caller is a diagnostic
+    and must not raise on a stray zip."""
+    import base64
+    import json as _json
+    import pickle
+    import zipfile
+    try:
+        with zipfile.ZipFile(path) as z:
+            blob = _json.loads(z.read("data").decode("utf-8"))
+        space = blob.get("observation_space")
+        if not isinstance(space, dict):
+            return None
+        shape = pickle.loads(base64.b64decode(space[":serialized:"])).shape
+        return int(shape[0])
+    except Exception:                                      # noqa: BLE001
+        return None
+
+
+def checkpoints_at_width(width: int, models_dir=None) -> list:
+    """Every checkpoint in `models/` that would load at `width`, newest first.
+
+    This exists because of what a stale named slot looks like from the outside.
+    `models/dd_combat_ppo_full_expedition.zip` is a stable POINTER that a
+    retrain has to be copied into, and on 2026-09-19 the 1836-wide retrain
+    landed while the slot kept the 1652 file -- so every bridge entry point
+    defaulted to a checkpoint that refused, the refusal said "no checkpoint
+    exists at the current width", and that was false: two did. A refusal that
+    misdescribes its own cause sends the reader to a retrain that has already
+    been run."""
+    d = Path(models_dir) if models_dir else (REPO_ROOT / "models")
+    if not d.is_dir():
+        return []
+    found = []
+    for cand in d.glob("*.zip"):
+        if checkpoint_width(cand) == width:
+            found.append(cand)
+    found.sort(key=lambda q: q.stat().st_mtime, reverse=True)
+    return found
+
+
+#: PLAYBOOK 3.2's own threshold, quoted from the spec rather than chosen here:
+#: *"HP crítico (<34%)"*. `tools/check_playbook.py` grades against the same
+#: number, and it must stay a coincidence of both reading the PLAYBOOK --
+#: `bridge/` may not import a ruler (`tests/suite/test_rulers.py`).
+CRITICAL_HP_FRACTION = 0.34
+
+
+def _heal_target(engine, action):
+    """The living hero a heal action is aimed at, or None.
+
+    `Action.target_id` is a RANK, not a hero index -- the same convention
+    `_target_label` decodes -- so the hero is found by position.
+    """
+    if action.target_id is None or action.target_id < 0:
+        return None
+    return next((h for h in engine.heroes
+                 if h.is_alive() and h.position == action.target_id), None)
+
+
+def is_a_heal(engine, action) -> bool:
+    """Does this action restore HP to an ally?
+
+    The same two conditions `tools/analyze_behaviour.categorize` uses, derived
+    independently here for the rule above: an ally-targeting skill that has a
+    `heal_min`. A stress heal is NOT one -- PLAYBOOK 3.2 is about HP, and 3.3
+    names stress relief as a thing to spend a secured turn ON.
+    """
+    sid = getattr(action, "skill_id", "") or ""
+    if sid.startswith("__"):
+        return False
+    try:
+        if not engine._is_ally_skill(sid):
+            return False
+        sd = engine.get_skill_data(sid, level=4)
+    except Exception:                                      # noqa: BLE001
+        return False
+    return sd is not None and sd.heal_min is not None
+
+
+def heal_is_justified(engine, action, in_stall: bool) -> tuple[bool, str]:
+    """PLAYBOOK 3.2, as `(justified, why)`.
+
+    > *"3.2 Curar -- Sólo en situaciones extremas o en stall. En el resto,
+    > jugar proactivo."*
+
+    Three ways to be extreme, in the order the spec measures them: the target
+    is on Death's Door, the target is under 34% HP, or the party is in a stall
+    the game is not yet charging for. Anything else is the reactive antipattern
+    the PLAYBOOK calls INCUMPLIDA.
+
+    A heal whose target cannot be identified is treated as JUSTIFIED. Refusing
+    what you cannot see is how a filter turns a seeding gap into a silently
+    worse turn, and the whole point of this one is that it only ever fires on
+    a case it can name.
+    """
+    target = _heal_target(engine, action)
+    if target is None:
+        return True, "the target could not be identified"
+    if getattr(target, "is_deaths_door", False):
+        return True, f"{target.name} is on Death's Door"
+    ceiling = max(getattr(target, "max_hp", 0) or 0, 1)
+    if target.hp < CRITICAL_HP_FRACTION * ceiling:
+        return True, (f"{target.name} is at "
+                      f"{100.0 * target.hp / ceiling:.0f}% HP")
+    if in_stall:
+        return True, "the party is in a stall"
+    return False, (f"{target.name} is at {100.0 * target.hp / ceiling:.0f}% HP, "
+                   f"not on Death's Door, and this is not a stall")
 
 
 def _repositioning_monsters(store) -> set[str]:
@@ -126,13 +243,25 @@ class Advisor:
     def __init__(self, model_path: Optional[str] = None,
                  total_combats: int = DEFAULT_TOTAL_COMBATS,
                  combats_total_explicit: bool = False,
-                 survival_episodes: int = 0):
+                 survival_episodes: int = 0,
+                 playbook_heals: bool = True,
+                 fate: bool = False):
         self.env = ExpeditionSequenceEnv()
+        #: Read the game's next rolls off the save and let them veto the
+        #: policy's pick (bridge/fate.py, DECOMP.md F15). Off by default: the
+        #: veto is measured in the simulator by tools/fate_eval.py first.
+        self.fate = fate
+        self._value_fn = None
+        self.last_fate = None
         self.store = self.env.store
         self.total_combats = max(1, total_combats)
         # An explicit --combats-total is the operator overriding the map, so it
         # must not be quietly replaced by what the map says.
         self._combats_total_explicit = combats_total_explicit
+        #: Apply PLAYBOOK 3.2 to the shortlist. Default ON -- Fran ruled on
+        #: 2026-09-20, shown the measurement. `--no-playbook-heals` is the way
+        #: back to the unfiltered arm without editing code.
+        self.playbook_heals = bool(playbook_heals)
         self.model = None
         #: Why the model is not loaded, when a path was given and refused.
         #: Empty when there is a model or when none was asked for.
@@ -154,13 +283,33 @@ class Advisor:
             # difference between a usable session and an exception per turn.
             want = self.env.observation_space.shape
             got = getattr(model.observation_space, "shape", None)
-            if got is not None and tuple(got) != tuple(want):
+            # A `--fate-obs` checkpoint (env/fate_wrapper.py) is exactly three
+            # wider: it reads the turn's known dice, which come off the save.
+            from env.fate_wrapper import fate_mode_for_width
+            self.fate_mode = (fate_mode_for_width(got[0], want[0])
+                              if got is not None else None)
+            self.fate_obs = self.fate_mode is not None
+            if got is not None and tuple(got) != tuple(want) and not self.fate_obs:
+                # Say which way out applies. A retrain that HAS been run and a
+                # retrain that has not are opposite situations with the same
+                # symptom, and the first is one `--model` argument away.
+                alts = [q for q in checkpoints_at_width(int(want[0]))
+                        if q.resolve() != Path(model_path).resolve()]
+                if alts:
+                    more = (f" and {len(alts) - 1} other" +
+                            ("s" if len(alts) > 2 else "")) if len(alts) > 1 else ""
+                    cure = (f" — but models/{alts[0].name}{more} already "
+                            f"load{'s' if not more else ''} at {want[0]}. Pass "
+                            f"--model models/{alts[0].name}, or copy it over the "
+                            f"named slot so every entry point picks it up.")
+                else:
+                    cure = (" — no checkpoint in models/ is at the current "
+                            "width, so this needs a retrain.")
                 self.model_refused = (
                     f"{Path(model_path).name} is {got[0]}-wide and this engine "
-                    f"produces {want[0]} — no checkpoint exists at the current "
-                    f"width, so combat advice AND the survival forecast are off "
-                    f"until a retrain. Route, torch, curio and camp still "
-                    f"decide, and every move you play is still recorded.")
+                    f"produces {want[0]}{cure} Until then combat advice AND the "
+                    f"survival forecast are off; route, torch, curio and camp "
+                    f"still decide, and every move you play is still recorded.")
                 print(f"note: {self.model_refused}")
             else:
                 self.model = model
@@ -224,6 +373,14 @@ class Advisor:
         self._profile = None
         self._survival_key = None
         self._survival_text = ""
+        #: Gold-equivalent still on the map, set by `run.Session` each time a
+        #: room is planned. Staying collects it and leaving does not -- see
+        #: `retreat.advise_retreat(loot_ahead_gold=...)`.
+        self.loot_ahead_gold = 0.0
+        #: The last survival rollout's P(the whole party dies). The battle
+        #: path reads it: inside a fight only a near-certain wipe may overrule
+        #: the combat model -- see `run.FIGHT_RETREAT_WIPE`.
+        self.last_wipe_rate = 0.0
         # What the last `recommend()` actually chose, kept structured beside the
         # printed block. `bridge/run.py` needs the Action and the board it was
         # chosen on to mark the recommendation against what the player then did;
@@ -412,13 +569,39 @@ class Advisor:
             return f"{header}\n  legal: " + "; ".join(legal)
 
         obs = self.env._get_obs()
+        if getattr(self, "fate_obs", False):
+            # The dice of THIS hero's turn, from the save's RNG state; neutral
+            # 0.5s when an enemy acts first and the seed is not this turn's.
+            from bridge.fate import fate_for_state                  # noqa: PLC0415
+            from env.fate_wrapper import live_features              # noqa: PLC0415
+            obs = np.concatenate([obs, live_features(
+                self.env.engine, self.env._action_map,
+                None if enemies_first else fate_for_state(state),
+                outcomes=self.fate_mode == "outcomes")])
         probs = self._action_probs(obs, mask)
         order = np.argsort(-probs) if probs is not None else None
         if order is None:
             idx, _ = self.model.predict(obs, action_masks=mask, deterministic=True)
             order = [int(idx)]
 
+        order, demoted = self._apply_playbook_32(engine, order)
+        fate_note = self._apply_fate(state, enemies_first, obs, mask, order)             if self.fate else ""
+        if fate_note.startswith("->"):
+            order = [int(fate_note.split()[1])] + [i for i in order
+                                                   if int(i) != int(fate_note.split()[1])]
+            fate_note = fate_note.split(" ", 2)[2]
+
         lines = [header]
+        if fate_note:
+            lines.append(f"  fate: {fate_note}")
+        if demoted:
+            # **SAY IT.** A decision layer that silently overrides the policy
+            # is the failure `dd-decide-layer-not-the-policy` is about: the
+            # deaths Fran could not explain were a retreat-pricing bug, and
+            # `bat/play.log` is the instrument that found it. If the block
+            # prints one move and the game is sent another, the log stops
+            # being evidence.
+            lines.append(f"  3.2: {demoted}")
         shown = 0
         for i, idx in enumerate(order):
             action = self.env._action_map.get(int(idx))
@@ -440,6 +623,112 @@ class Advisor:
         if survival:
             lines.append(f"  {survival}")
         return "\n".join(lines)
+
+    def _apply_fate(self, state, enemies_first, obs, mask, order) -> str:
+        """The known dice for THIS turn, and a veto when they change the pick.
+
+        Returns `"-> <action> <note>"` when the pick changes, a plain note when
+        it does not, `""` when the dice are not known (an enemy acts first, so
+        the save's seed is not this hero's turn-start state)."""
+        from bridge.fate import fate_for_state, gated_choice, make_value_fn  # noqa: PLC0415
+        self.last_fate = None
+        if enemies_first or self.model is None:
+            return ""
+        fate = fate_for_state(state)
+        if fate is None:
+            return ""
+        self.last_fate = fate
+        if getattr(self, "fate_obs", False):
+            # The policy itself sees the dice; a veto on top would second-guess
+            # the very thing it was trained to read.
+            return (f"hit roll {fate.hit_roll:.3f}, crit roll {fate.crit_roll:.3f}, "
+                    f"damage at {fate.damage_u:.0%} (read by the policy)")
+        if self._value_fn is None:
+            self._value_fn = make_value_fn(self.model)
+        actor = self.env.engine.heroes[self.env.engine.get_current_actor_id()]
+        facts = (f"hit roll {fate.hit_roll:.3f} (hits where chance > it, always "
+                 f"at >= 0.95), crit roll {fate.crit_roll:.3f} "
+                 f"(crit if < {actor.crit:.0%} + skill), damage at "
+                 f"{fate.damage_u:.0%} of the range")
+        explain: list = []
+        a0 = int(order[0])
+        try:
+            pick = gated_choice(self.model, self.env, self._value_fn, obs, mask, fate,
+                                explain=explain)
+        except Exception as exc:                        # noqa: BLE001
+            return f"{facts} (look-ahead failed: {exc})"
+        if pick != a0 and explain:
+            _, _, q0, q1 = explain[0]
+            was = self.env._action_map.get(a0)
+            now = self.env._action_map.get(pick)
+            return (f"-> {pick} {facts}; switched from "
+                    f"{self.describe(self.env.engine, was) if was else a0} "
+                    f"(value {q0:.1f} -> {q1:.1f})")
+        return facts
+
+    def _apply_playbook_32(self, engine, order):
+        """Demote heals PLAYBOOK 3.2 does not justify. `(order, note)`.
+
+        > *"3.2 Curar -- Sólo en situaciones extremas o en stall."*
+
+        Fran asked for this on 2026-09-20, having been shown the measurement:
+        `tools/check_playbook.py` on the shipped checkpoint reports **35.5% of
+        299 heals** as neither Death's Door, nor under 34% HP, nor stall --
+        106 turns, **4.3% of every hero turn** -- scoring **-0.0820** against
+        **+0.1021** for a justified one. The reward separates them by 0.18 and
+        the policy plays the negative one anyway, so this is not something a
+        reward knob reaches.
+
+        **DEMOTED, never dropped, and that is the whole safety argument.** A
+        hero can be in a position where every legal action is an unjustified
+        heal -- a back-rank healer whose attack cannot reach, a skill list of
+        nothing else. Dropping them would leave an empty shortlist and the
+        actuator with nothing to send, which is a worse failure than a wasted
+        heal. Reordering keeps a total order: the compliant moves come first,
+        and if there are none the policy's own ranking survives intact.
+
+        It fires only on a case it can NAME. A heal whose target cannot be
+        identified counts as justified -- see `heal_is_justified` -- because
+        refusing what you cannot see turns a seeding gap into a worse turn.
+
+        Off with `--no-playbook-heals`, which is there so the next person to
+        measure this can get the unfiltered arm back without editing code.
+        """
+        if not self.playbook_heals:
+            return order, ""
+        try:
+            in_stall = bool(self.env.is_recovery_phase())
+        except Exception:                                  # noqa: BLE001
+            in_stall = False
+        keep, demote, head_why = [], [], ""
+        for idx in order:
+            action = self.env._action_map.get(int(idx))
+            if action is not None and is_a_heal(engine, action):
+                ok, why = heal_is_justified(engine, action, in_stall)
+                if not ok:
+                    if not demote and not keep:
+                        # It was the policy's TOP pick, so this demotion is
+                        # the only one that changes what gets played.
+                        head_why = (f"{self.describe(engine, action)} "
+                                    f"demoted - {why}")
+                    demote.append(idx)
+                    continue
+            keep.append(idx)
+        if not demote or not keep:
+            # Nothing to do, or nothing compliant to promote. Either way the
+            # policy's ranking stands, and saying so beats a note that implies
+            # a move was changed when none was.
+            return order, ("" if not demote else
+                           "every legal move is an unjustified heal - "
+                           "leaving the policy's own order")
+        # **THE NOTE ONLY SPEAKS WHEN THE MOVE CHANGED**, which is `head_why`
+        # being set. Demoting an ALTERNATIVE changes nothing that gets sent,
+        # and saying "demoted" for it reads as an override that did not
+        # happen -- on the first replay, 11 fires printed a line and only a
+        # few of them moved the head. A log that overstates what the bridge
+        # did stops being evidence, which is the whole reason this line
+        # exists (`dd-decide-layer-not-the-policy`).
+        return list(keep) + list(demote), head_why
 
     def load_quest(self, raid_file) -> None:
         """Read the active quest and its reward once, from `raid_instance`.
@@ -464,6 +753,9 @@ class Advisor:
             self._profile = folder if (folder / "persist.upgrades.json").exists() else None
         except Exception:
             self._profile = None
+        #: Kept so the survival forecast can read the REAL fights ahead off the
+        #: map beside it (`bridge/fights_ahead.py`).
+        self._raid_file = raid_file
 
     # ── should we still be here? ──
 
@@ -504,7 +796,8 @@ class Advisor:
         if remaining is None or remaining <= 0:
             return ""
         key = (state.battles_completed, remaining,
-               tuple((round(h.hp), round(h.stress)) for h in state.heroes))
+               tuple((round(h.hp), round(h.stress)) for h in state.heroes),
+               round(self.loot_ahead_gold))
         if key == self._survival_key:
             return self._survival_text
         zone_id = tier = None
@@ -519,11 +812,26 @@ class Advisor:
         else:
             return ""
         party = [PartyMember.from_live_hero(h) for h in state.heroes]
+        # **The fights ahead are KNOWN, not sampled** (2026-09-25): the map's
+        # `mash_index` names each remaining group. Empty on any failure, and
+        # then the rollout samples the zone pool as before.
+        groups = []
+        raid_file = getattr(self, "_raid_file", None)
+        if raid_file:
+            try:
+                from bridge.fights_ahead import fights_ahead  # noqa: PLC0415
+                groups = fights_ahead(
+                    Path(str(raid_file).replace("raid.json", "map.json")), raid_file)
+            except Exception:                                  # noqa: BLE001
+                groups = []
         result = self._rollout.evaluate(
             party, zone_id=zone_id, tier=tier, num_combats=remaining,
-            length_band=band_for(remaining), episodes=self._survival_episodes)
+            length_band=band_for(remaining), episodes=self._survival_episodes,
+            enemy_groups=groups or None)
+        self.last_wipe_rate = float(getattr(result, "wipe_rate", 0.0) or 0.0)
         advice = advise_retreat(state.heroes, result, self._reward or QuestReward(),
-                                profile=self._profile, store=self.store)
+                                profile=self._profile, store=self.store,
+                                loot_ahead_gold=self.loot_ahead_gold)
         verdict = ("RETREAT" if advice.retreat else "worth pushing on")
         self._survival_key = key
         self._survival_text = (
@@ -710,6 +1018,9 @@ def main() -> int:
     ap.add_argument("--log", default=None, metavar="FILE",
                     help="append every recommendation here — the save captures "
                          "record the board but never what was advised")
+    ap.add_argument("--no-playbook-heals", action="store_true",
+                    help="do not apply PLAYBOOK 3.2 to the shortlist "
+                         "- let the policy's own heal ranking stand")
     ap.add_argument("--survival", type=int, nargs="?", const=12, default=0,
                     metavar="EPISODES",
                     help="also estimate the chance of finishing the dungeon "
@@ -726,7 +1037,8 @@ def main() -> int:
     advisor = Advisor(model,
                       total_combats=args.combats_total or DEFAULT_TOTAL_COMBATS,
                       combats_total_explicit=args.combats_total is not None,
-                      survival_episodes=args.survival)
+                      survival_episodes=args.survival,
+                      playbook_heals=not args.no_playbook_heals)
 
     if args.raid or args.once:
         if args.raid:

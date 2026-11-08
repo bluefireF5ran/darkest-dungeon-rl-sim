@@ -113,7 +113,13 @@ FLOOR_MEAN_DEATHS = 0.5
 # `--stress-weight`, `--prevention-reward` and the five distribution knobs: a
 # contested change ships switched off and gets measured, rather than being
 # decided by whoever wrote it.
-SCALE_FLOOR_BY_INVESTMENT = False
+#
+# **Switched ON 2026-09-23 by Fran's ruling**, after a night of raids ended at
+# the entrance with nothing banked: *"those level 0 heroes are super
+# expendable, as you wont probably invest on them"*, and *"retreating is worse
+# the less money you have, as you prefer deaths when you are stuck"*. A party
+# worth less than the quest no longer gets the floor.
+SCALE_FLOOR_BY_INVESTMENT = True
 
 
 @dataclass(frozen=True)
@@ -273,6 +279,7 @@ def advise_retreat(heroes, rollout_result, reward: QuestReward,
                    game_dir: str | Path = GAME_DIR,
                    profile=None, store=None,
                    scale_floor_by_investment: bool = SCALE_FLOOR_BY_INVESTMENT,
+                   loot_ahead_gold: float = 0.0,
                    ) -> RetreatAdvice:
     """Two bills, in gold, with a survival floor over the top. Retreat when the
     smaller bill is leaving, or when the floor fires whatever the bills say.
@@ -295,21 +302,48 @@ def advise_retreat(heroes, rollout_result, reward: QuestReward,
     sunk = party_investment(living, game_dir, profile, store)
     mean_sunk = (sum(s for _c, s in sunk) / len(sunk)) if sunk else 0.0
 
-    # Leaving: everyone eats the retreat stress, and the quest pays nothing.
-    retreat_stress_gold = retreat_stress * len(living) * rate
+    # **STRESS IS NOT BILLED IN GOLD, on either side.** Fran, 2026-09-23:
+    # *"stress is managable, the only thing that matters is the survival
+    # percent ... we should manage an average between, survives and gathers
+    # most loot possible"*. What stress does to a raid -- afflictions, heart
+    # attacks, a team pushed toward 100 by one retreat after another -- the
+    # rollout already simulates, and it shows up here as `mean_deaths`.
+    # Pricing it again in gold counted it twice: at the Abbey's 22 gold a
+    # point, a free level-0 party read ~8,000 gold for staying and retreated
+    # from every fight of the raid. The fields stay, at zero, so a reader of
+    # the advice sees that stress was left out on purpose.
+    retreat_stress_gold = 0.0
+    expected_stress_gold = 0.0
     forfeited = float(reward.gold)
-    cost_retreat = retreat_stress_gold + forfeited
+    # **Leaving costs NOTHING beyond what staying would have earned.** The
+    # reward used to be charged here in full AND credited to staying at
+    # `completion_rate * reward` -- counted twice. Live 2026-09-23: a party
+    # down to its Vestal read "leaving ~3,000, staying ~3,000 -- worth pushing
+    # on" and walked back into the fight that had killed two, because leaving
+    # was billed the whole 3,000 reward that a lone hero was never going to
+    # collect. Fran: *"now its a good opportunity to retreat, but keeps looping
+    # into the combat"*. Staying's bill already carries the reward at its real
+    # odds, so leaving is zero and the question is whether staying's expected
+    # gain beats its expected deaths. `forfeited` stays in the advice for the
+    # reader.
+    cost_retreat = 0.0
 
-    # Staying: the stress still to be taken, plus deaths, less what gets paid.
-    # Both sides are PARTY totals: per-hero stress scaled by the party, the way
-    # `retreat_stress_gold` above already is.
-    carried = (current_stress if current_stress is not None
-               else (statistics.mean(float(getattr(h, "stress", 0.0) or 0.0)
-                                     for h in living) if living else 0.0))
-    extra_stress = max(0.0, rollout_result.mean_final_stress - carried)
-    expected_stress_gold = extra_stress * len(living) * rate
-    expected_death_gold = rollout_result.mean_deaths * mean_sunk
+    # **A death always costs something, even a free recruit's.** Fran:
+    # *"we shouldn't guide the model towards losing a hero"*. A hero is worth
+    # what was spent on them, and at least their share of what this quest
+    # pays -- what a hero earns per raid, and so what the next raids lose
+    # when one dies. Derived from the quest, not an invented constant.
+    share = forfeited / len(living) if living else 0.0
+    hero_value = max(mean_sunk, share)
+    expected_death_gold = rollout_result.mean_deaths * hero_value
     expected_reward_gold = rollout_result.completion_rate * reward.gold
+    # **Staying also collects what is still on the map**, and leaving does
+    # not. Fran, 2026-09-23: the bill only counted the quest reward, so the
+    # provisions already bought -- worthless once the party leaves -- and the
+    # loot they were bought to reach never entered it. Scaled by the same
+    # completion rate as the reward: a party that does not get there does not
+    # collect it. Default 0 keeps every existing caller's answer.
+    expected_reward_gold += rollout_result.completion_rate * float(loot_ahead_gold)
     cost_continue = expected_stress_gold + expected_death_gold - expected_reward_gold
 
     # Does the floor apply at all? With scaling on it stands aside when the

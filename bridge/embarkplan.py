@@ -51,12 +51,13 @@ from __future__ import annotations
 import argparse
 import random
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Optional, Sequence
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from bridge import hero_roles
 from bridge.embark import candidate_shapes
 from bridge.town_state import Quest, RosterHero, TownState, read_town_state
 from data import provisions
@@ -72,11 +73,45 @@ CURATED = "curated_comps"
 
 PARTY_SIZE = 4
 
+#: **Count a seat's kit, not only its bill** (2026-10-10, the campaign
+#: simulator). A fodder hero is never bought skills (Fran, 2026-09-25), so
+#: its seat has no `unlocks` and read as a free, perfect fit even when the
+#: hero owns none of the comp's four -- it then fought with whatever the
+#: coach rolled. With this on, the comp skills a seat will NOT have
+#: (`Seat.lacks`) weigh in the draw like an unlock does, and a class's
+#: candidates are tried owning-the-kit first. Spends nothing.
+KIT_AWARE = True
+
+#: Gold the top-up may not spend: one skill unlock (1,000) plus one stress
+#: treatment (up to 1,250). See `_spend_the_remainder`.
+TOP_UP_RESERVE = 2250
+
 #: Stress at which the game runs a hero's Resolve Check. `engine/stress.py`
 #: carries the same 100 for combat; here it is the line between a hero who is
 #: tired and one who is **already afflicted**, since an affliction lasts the
 #: rest of the raid and a Resolve Check cannot be passed twice.
 RESOLVE_CHECK = 100.0
+
+#: Stress at which a hero is STRAINED and should sit the week out.
+#
+# **The gate used to be `RESOLVE_CHECK` alone, and that is the wrong question
+# for choosing a party.** At 100 a hero is already afflicted; below it the
+# game lets you send them, and this module deliberately refused to be
+# cleverer than the game about that half. What it missed is that "legal to
+# send" and "worth sending" are different, and nothing else re-picked: the
+# comp is chosen deterministically, so the same tired four went out again.
+#
+# Measured 2026-09-21 on Fran's campaign: an Occultist at 60 stress was
+# fielded at rank 1 on a 19 HP body, the party embarked a second time on week
+# 2 without a single change, and came home as one hero at 3 HP and 157
+# stress. Fran: *"after the first expedition we immediately went onto the 2nd
+# one with the same comp without changing heroes even if they were stressed
+# out ... each week lets redo the comp"*.
+#
+# 50 is the Hamlet's own line -- the point at which DD starts showing the
+# stress bar as a concern -- and it is the same threshold the team-builder
+# repo filters on, reached independently there from a roster study.
+STRAINED = 50.0
 
 
 @dataclass(frozen=True)
@@ -87,6 +122,9 @@ class Seat:
     skills: tuple[str, ...] = ()    # the comp's four, in the comp's order
     unlocks: tuple[str, ...] = ()   # of those, the ones not yet bought
     cost: int = 0
+    #: Of the comp's four, the ones this hero will go WITHOUT: not owned and
+    #: not being bought (a fodder seat, or an unlock trimmed off the budget).
+    lacks: tuple[str, ...] = ()
 
     def line(self) -> str:
         buy = f"  buy {', '.join(self.unlocks)} ({self.cost}g)" if self.unlocks else ""
@@ -142,25 +180,161 @@ class EmbarkPlan:
         return "\n".join(out)
 
 
-def pick_quest(town: TownState) -> Optional[Quest]:
-    """The quest to take: shortest first, then the biggest reward.
+#: A quest is in reach when four rested, eligible heroes can go and at most
+#: this many of them are a level short of it (Fran: "optionally 1 underleveled
+#: hero").
+MAX_UNDERLEVELED = 1
+#: A boss is a harder fight than its tier: nobody under the quest level goes.
+BOSS_MAX_UNDERLEVELED = 0
+#: EXPERIMENT knob, 0 = Fran's rule as it stands: a boss party is at the
+#: quest level. N > 0 asks for N levels ABOVE it (an Apprentice boss at 1+N).
+#: Priced by the campaign simulator (2026-10-10), not a ruling.
+BOSS_LEVEL_MARGIN = 0
+#: EXPERIMENT knob, None = Fran's rule as coded: the one underlevelled hero
+#: may be any number of levels short (a level-0 in a Champion party). N
+#: allows at most N levels short. Priced by the campaign simulator, not a ruling.
+UNDERLEVEL_MAX_GAP = None
 
-    Shortest first is deliberate and is not a tie-break -- a fresh roster at
-    resolve 0 with rank-0 gear survives a short run and does not survive a long
-    one, and `EXPEDITION_LENGTH_BANDS` puts 14-16 combats in the long band
-    against 3-8 in the short.
+
+def _shortfall(levels, need: int) -> int:
+    """Heroes under `need`. A hero further short than `UNDERLEVEL_MAX_GAP`
+    puts the party over every limit, but still ranked by its count: a
+    flat sentinel tied a four-level-0 seat with a one-level-0 seat and undid
+    the fewest-underlevelled fallback (first gap-1 run, 2026-10-11)."""
+    gaps = [need - lv for lv in levels if lv < need]
+    if UNDERLEVEL_MAX_GAP is not None and any(g > UNDERLEVEL_MAX_GAP for g in gaps):
+        return PARTY_SIZE + 1 + len(gaps)
+    return len(gaps)
+
+
+def _boss_level(q: Quest) -> int:
+    return _quest_level(q) + BOSS_LEVEL_MARGIN
+
+
+def _quest_level(q: Quest) -> int:
+    """The resolve level a quest is pitched at, which IS its difficulty:
+    Apprentice 1, Veteran 3, Champion 5. A hero below it carries the game's
+    underlevelled penalty (`effectiveDifficultyAfflictionOnsetModifiers`,
+    engine `level_shortfall`) -- a level-0 hero is one short on Apprentice."""
+    return int(q.difficulty)
+
+
+def _party_for(town: TownState, q: Quest) -> list:
+    pool, _benched = _rested(town.eligible(q))
+    return sorted(pool, key=lambda h: (-h.resolve_level, h.stress))[:PARTY_SIZE]
+
+
+def quest_in_reach(town: TownState, q: Quest) -> bool:
+    party = _party_for(town, q)
+    if len(party) < PARTY_SIZE:
+        return False
+    boss = q.quest_type == "kill_boss"
+    need = _boss_level(q) if boss else _quest_level(q)
+    short = (sum(1 for h in party if h.resolve_level < need) if boss
+             else _shortfall([h.resolve_level for h in party], need))
+    limit = BOSS_MAX_UNDERLEVELED if boss else MAX_UNDERLEVELED
+    return short <= limit
+
+
+def boss_worth_it(q: Quest) -> bool:
+    """A boss quest whose trinket is a real advantage (Fran, 2026-10-01:
+    "prefiero buscar una que me de una ventaja real"), judged by HIS tier
+    list (`data/trinket_tiers`). Every boss pays a very rare; most are not."""
+    if q.quest_type != "kill_boss":
+        return False
+    from data.trinket_tiers import worth_a_boss                    # noqa: PLC0415
+    return any(worth_a_boss(t) for t in q.reward_trinkets)
+
+
+def pick_quest(town: TownState) -> Optional[Quest]:
+    """The quest to take.
+
+    1. **The highest difficulty the roster can field.** A hero refuses a quest
+       below their band (`town.eligible` is the game's own resolve cap), so a
+       campaign that never climbs is a campaign whose levelled heroes sit in
+       the Hamlet forever -- the 2026-09-28 audit found the bridge at week 77
+       with a mean hero level of 1.0 because this used to be shortest-first
+       over everything. In reach = four rested eligible heroes, at most
+       `MAX_UNDERLEVELED` of them a level short.
+    2. **A boss only for a trinket worth it**, and never underlevelled. Fran
+       passed on 12 of 12 boss offers whose rewards sat in the bottom tiers of
+       his list; this reproduces every one of those decisions.
+    3. Within that: shortest first, then the biggest reward -- a short run is
+       what a thin roster survives.
+
+    When nothing is in reach (a roster under four, or a fresh one all at
+    level 0), the LOWEST difficulty is taken, then shortest, then gold -- the
+    old rule ordered by gold before difficulty and would send a green roster
+    to a Veteran quest for a bigger purse. **Never a boss** there: an
+    Apprentice boss tied with the Apprentice quests, and the campaign
+    simulator sent green rosters to the Necromancer 129 times out of 159
+    lost (2026-10-10).
     """
-    options = [q for q in town.quests if q.simulable]
+    options = [q for q in town.quests if q.simulable
+               and (q.quest_type != "kill_boss" or boss_worth_it(q))]
     if not options:
         return None
-    return min(options, key=lambda q: (q.length, -q.gold_reward, q.key))
+    reach = [q for q in options if quest_in_reach(town, q)]
+    if reach:
+        return min(reach, key=lambda q: (-q.difficulty, not boss_worth_it(q),
+                                         q.length, -q.gold_reward, q.key))
+    options = [q for q in options if q.quest_type != "kill_boss"]
+    if not options:
+        return None
+    return min(options, key=lambda q: (q.difficulty, q.length, -q.gold_reward, q.key))
 
 
 def _seat_cost(profile, hero: RosterHero, skills: Sequence[str],
                game_dir: str) -> tuple[tuple[str, ...], int]:
+    # **Never for FODDER** (Fran, 2026-09-25 for level 0, widened 2026-09-26
+    # to the fodder role): they are expendable and the coach replaces them
+    # for free, so a skill bought for one is gold the next death throws away.
+    # They go with the skills they have.
+    if _role(hero) == "fodder":
+        return (), 0
     want = missing_skills(profile, hero, skills, game_dir)
     gold = unlock_cost(profile, hero, skills, game_dir)
     return want, (gold if gold is not None else 0)
+
+
+def _role(hero) -> str:
+    """`hero_roles.role_of` off the roster record alone (no upgrades file):
+    level, the save's gear ranks, and the quirk score for the class."""
+    h = getattr(hero, "hero", hero)
+    gear = (int(getattr(h, "weapon_rank", 0) or 0)
+            + int(getattr(h, "armour_rank", 0) or 0))
+    score = hero_roles.nurture_score(getattr(h, "hero_class", ""),
+                                     getattr(h, "quirks", None) or ())
+    return hero_roles.role_of(int(getattr(h, "resolve_level", 0) or 0), 0,
+                              score, gear)
+
+
+#: The comp draw's weight per seated hero, by role (Fran, 2026-09-26:
+#: "priorize the most invested non stressed heroes"). A declared convention.
+ROLE_DRAW_WEIGHT = {"invested": 2.0, "nurture": 1.5, "fodder": 1.0}
+#: A party spanning more than one level band is drawn this much less
+#: ("all heroes on the same lvl threshold optimal for the mission").
+MIXED_BAND_WEIGHT = 0.25
+#: A second nurture hero in one party ("optionally 1 underleved hero").
+EXTRA_NURTURE_WEIGHT = 0.25
+
+
+def party_weight(seats) -> float:
+    """How much the draw favours this party: invested and rested heroes,
+    one level band, at most one nurture hero. Multiplies the unlock weight."""
+    heroes = [getattr(st, "hero", st) for st in seats]
+    if not heroes:
+        return 1.0
+    w = 1.0
+    roles = [_role(h) for h in heroes]
+    for h, r in zip(heroes, roles):
+        stress = float(getattr(h, "stress", 0.0) or 0.0)
+        w *= ROLE_DRAW_WEIGHT.get(r, 1.0) * max(0.1, 1.0 - stress / 200.0)
+    if len({hero_roles.band_of(getattr(h, "resolve_level", 0)) for h in heroes}) > 1:
+        w *= MIXED_BAND_WEIGHT
+    if roles.count("nurture") > 1:
+        w *= EXTRA_NURTURE_WEIGHT ** (roles.count("nurture") - 1)
+    return w
 
 
 def fill_cheapest(comp, pool: list[RosterHero], profile,
@@ -192,8 +366,10 @@ def fill_cheapest(comp, pool: list[RosterHero], profile,
         skills = tuple(slot.skill_ids)
 
         def key(h: RosterHero):
-            _, gold = _seat_cost(profile, h, skills, game_dir)
-            return (gold, h.stress, -h.resolve_level)
+            want, gold = _seat_cost(profile, h, skills, game_dir)
+            lacks = (len(_lacks(profile, h, skills, want, game_dir))
+                     if KIT_AWARE else 0)
+            return (gold, lacks, _role(h) != "invested", h.stress, -h.resolve_level)
 
         pick = min(options, key=key)
         remaining.remove(pick)
@@ -214,8 +390,16 @@ def _build_party(filled, profile, game_dir: str) -> tuple[tuple[Seat, ...], int]
         want, gold = _seat_cost(profile, hero, skills, game_dir)
         total += gold
         seats.append(Seat(rank=index + 1, hero=hero, skills=skills,
-                          unlocks=want, cost=gold))
+                          unlocks=want, cost=gold,
+                          lacks=_lacks(profile, hero, skills, want, game_dir)))
     return tuple(seats), total
+
+
+def _lacks(profile, hero: RosterHero, skills: Sequence[str],
+           buying: Sequence[str], game_dir: str) -> tuple[str, ...]:
+    """The comp skills this hero neither owns nor is being bought."""
+    missing = missing_skills(profile, hero, skills, game_dir)
+    return tuple(k for k in missing if k not in buying)
 
 
 def _trim_to_budget(seats: Sequence[Seat], budget: int) -> tuple[tuple[Seat, ...], int]:
@@ -235,7 +419,8 @@ def _trim_to_budget(seats: Sequence[Seat], budget: int) -> tuple[tuple[Seat, ...
         if not seat.unlocks:
             continue
         total -= seat.cost
-        kept[i] = Seat(rank=seat.rank, hero=seat.hero, skills=seat.skills)
+        kept[i] = Seat(rank=seat.rank, hero=seat.hero, skills=seat.skills,
+                       lacks=tuple(seat.lacks) + tuple(seat.unlocks))
     return tuple(kept), total
 
 
@@ -328,8 +513,18 @@ def _basket_for(quest, level, game_dir, seats, gold, notes) -> tuple[dict, int]:
     could need, so the skill budget can only turn out larger than promised.
     """
     party = [s.hero.hero_class for s in seats]
+    # PLAYBOOK 7.7: the game's own averages, not the community table, for
+    # every item they cover -- rounded UP, "go over than under".
+    from bridge.provision_needs import derived_basket      # noqa: PLC0415
+    band = provisions.LENGTH_TO_BAND.get(quest.length, "short")
+    try:
+        derived = derived_basket(quest.dungeon, band,
+                                 getattr(quest, "quest_type", "") or "explore",
+                                 str(game_dir))
+    except Exception:                                      # noqa: BLE001
+        derived = {}
     want = provisions.basket(quest.dungeon, quest.length, level, game_dir,
-                             party=party)
+                             party=party, derived=derived)
     cost = provisions.cost(want, game_dir)
     if cost > gold:
         want = provisions.afford(want, gold, game_dir)
@@ -366,10 +561,14 @@ def _rested(pool: Sequence[RosterHero]) -> tuple[list[RosterHero],
     tired hero in it, and because a campaign that cannot field anybody is one
     the Hamlet has to fix rather than one this function should refuse.
     """
-    fit = [h for h in pool if h.stress < RESOLVE_CHECK]
-    if len(fit) < PARTY_SIZE:
-        return list(pool), []
-    return fit, [h for h in pool if h.stress >= RESOLVE_CHECK]
+    # **Bench the STRAINED first, and fall back to the afflicted line.** Two
+    # gates, tried in order, so a roster that cannot field four rested heroes
+    # still sends the four it has rather than refusing the week.
+    for bar in (STRAINED, RESOLVE_CHECK):
+        fit = [h for h in pool if h.stress < bar]
+        if len(fit) >= PARTY_SIZE:
+            return fit, [h for h in pool if h.stress >= bar]
+    return list(pool), []
 
 
 def launchable_from(store, hero_class: str, rank: int) -> int:
@@ -390,6 +589,46 @@ def launchable_from(store, hero_class: str, rank: int) -> int:
         if not skill.levels:
             continue
         launch = skill.levels[max(skill.levels)].launch or ()
+        if not launch or rank in launch:
+            seen += 1
+    return seen
+
+
+def launchable_equipped(store, hero, rank: int) -> Optional[int]:
+    """How many of THIS hero's four equipped skills launch from `rank`.
+
+    **`launchable_from` reads the CLASS, and a hero is not their class.** A
+    level-0 hero carries four of the seven, chosen at the Guild, and two
+    heroes of one class can carry different four -- Fran's own roster holds
+    two Bounty Hunters, one with `uppercut` and one with `finish_him`, which
+    the class-level count scores identically. Seating on the class list can
+    therefore seat a hero for skills they do not have.
+
+    Fran, 2026-09-21: *"early game (weeks under week 20) we should try to use
+    heroes that already can use most of their skills in their rank"*. That is
+    a question about the equipped four, so this answers it directly.
+
+    Returns None when the save records no equipped skills, which is the
+    honest answer rather than 0 -- a hero whose loadout cannot be read must
+    fall back to the class count, not be scored unusable.
+    """
+    equipped = list(getattr(getattr(hero, "hero", hero), "selected_skills",
+                            []) or [])
+    if not equipped:
+        return None
+    cls = getattr(hero, "hero_class", "")
+    record = store.heroes.get(cls)
+    if record is None:
+        return None
+    launches = {}
+    for skill in record.skills:
+        if skill.levels:
+            launches[skill.id] = skill.levels[max(skill.levels)].launch or ()
+    seen = 0
+    for sid in equipped:
+        launch = launches.get(sid)
+        if launch is None:            # camp skill, mod skill, unknown id
+            continue
         if not launch or rank in launch:
             seen += 1
     return seen
@@ -421,7 +660,17 @@ def best_formation(store, heroes: Sequence[RosterHero]) -> list:
     n = len(picked)
     if n < 2:
         return picked
-    fit = {(i, r): launchable_from(store, picked[i].hero_class, r + 1)
+    # **The hero's OWN four, when the save records them.** See
+    # `launchable_equipped`: the class list scores two heroes of one class
+    # identically even when they carry different skills, and it counts
+    # skills a level-0 hero has not bought.
+    def _fit(hero, rank: int) -> int:
+        mine = launchable_equipped(store, hero, rank)
+        if mine is None:
+            return launchable_from(store, hero.hero_class, rank)
+        return mine
+
+    fit = {(i, r): _fit(picked[i], r + 1)
            for i in range(n) for r in range(n)}
     best, order = -1, tuple(range(n))
     for cand in itertools.permutations(range(n)):
@@ -431,9 +680,109 @@ def best_formation(store, heroes: Sequence[RosterHero]) -> list:
     return [picked[i] for i in order]
 
 
+def _spend_the_remainder(plan, quest, gold: int, game_dir: str):
+    """Put leftover gold into torches and food, after everything else.
+
+    **Order matters and it is already fixed.** `docs/BRIDGE.md`: provisions
+    are reserved FIRST, at PLAYBOOK 1.5's recommended end, and the skill
+    budget is what is left. Topping the basket up inside `_basket_for` would
+    invert that -- a maxed basket eats the whole unlock budget -- so this runs
+    last, on gold nothing else claimed.
+
+    Fran, 2026-09-21: *"we should buy extra food and torches if we have money
+    on the provisions (max if possible)"*. The measurement behind it: a live
+    raid bought the guide's eight torches, ran out before `rooF`, and then
+    took a fight at torch 6 -- the hard floor only binds *while the pack can
+    afford the light*, so an empty pack turns the torch policy off silently.
+    The shop's own stock is the ceiling, so "max" is a real bound.
+    """
+    # **A RESERVE, because "max if possible" is not "all of it".** Measured
+    # live 2026-09-22: this took the wallet 5,070 -> 20, which is 99.6% of
+    # the estate's gold into one expedition's food and torches. The next week
+    # could then buy no skill unlock (1,000), no stress treatment (1,000 to
+    # 1,250) and no recruit, and a retreat -- which the survival layer calls
+    # for often at Resolve 0 -- threw the lot away. Fran: *"never overwaste
+    # money on heroes until you have some extra money outside of the money on
+    # provisions ... we should use a threshold to not overspend the money
+    # there"*.
+    #
+    # The floor is one skill unlock plus one treatment, which is the cheapest
+    # week that still improves the roster. The GUIDE basket is never cut by
+    # this -- only the top-up is -- so a reserve can never make a party go
+    # out under-provisioned; it only stops the surplus being spent.
+    left = gold - plan.basket_cost - plan.unlocks_cost - TOP_UP_RESERVE
+    if left <= 0:
+        return plan
+    topped = provisions.top_up(plan.basket, plan.basket_cost + left,
+                               quest.length, game_dir)
+    topped = fill_open_stacks(plan.basket, topped)
+    if topped == plan.basket:
+        return plan
+    extra = {i: topped[i] - plan.basket.get(i, 0) for i in topped
+             if topped[i] > plan.basket.get(i, 0)}
+    cost = provisions.cost(topped, game_dir)
+    note = ("spare gold spent on "
+            + ", ".join(f"+{n} {i}" for i, n in sorted(extra.items()))
+            + " -- up to what the shop stocks")
+    return replace(plan, basket=topped, basket_cost=cost,
+                   notes=tuple(plan.notes) + (note,))
+
+
+#: The pack's stack size per top-up item (`inventory.item_defs`: food 12,
+#: torch 8). Restated so the embark plan does not parse item files.
+TOP_UP_STACKS = {"food": 12, "torch": 8}
+
+
+def fill_open_stacks(basket: dict, topped: dict,
+                     stacks: dict = TOP_UP_STACKS) -> dict:
+    """The top-up, limited to the stacks the basket already opens.
+
+    **A surplus stack costs a pack slot for the whole raid.** Measured
+    2026-09-27: the loop went out with "+6 food, +9 torch" on top of the
+    guide basket -- 18 food in two slots and 18 torches in three -- and then
+    met the game's "no room" modal about 480 times across 40 raid logs,
+    walking away from curio and battle loot. Filling the partial stack keeps
+    the extra light and food and never opens a slot for it.
+    """
+    out = dict(topped)
+    for item, size in stacks.items():
+        have = int(basket.get(item, 0) or 0)
+        want = int(topped.get(item, have) or 0)
+        if want <= have:
+            continue
+        ceiling = -(-have // size) * size if have else 0
+        out[item] = max(have, min(want, ceiling))
+    return out
+
+
+#: The most of the gold on hand an embark may spend on skill unlocks.
+UNLOCK_GOLD_FRACTION = 0.10
+
+#: How many further draws `veto` may reject before the first draw stands.
+VETO_REDRAWS = 5
+
+
 def plan_embark(town: TownState, store, profile, rng=None,
                 game_dir: str = str(GAME_DIR),
-                level: str = provisions.RESERVE) -> Optional[EmbarkPlan]:
+                level: str = provisions.RESERVE,
+                veto=None) -> Optional[EmbarkPlan]:
+    """Decide a whole embark, then spend what is left on light and food.
+
+    The decision itself is `_decide_embark`; this is the one seam where the
+    REMAINDER is known -- after the basket is reserved and the skill unlocks
+    are chosen -- which is the only point at which "spare gold" means
+    anything. See `_spend_the_remainder`.
+    """
+    plan = _decide_embark(town, store, profile, rng, game_dir, level, veto)
+    if plan is None or plan.quest is None:
+        return plan
+    return _spend_the_remainder(plan, plan.quest, plan.gold, game_dir)
+
+
+def _decide_embark(town: TownState, store, profile, rng=None,
+                   game_dir: str = str(GAME_DIR),
+                   level: str = provisions.RESERVE,
+                   veto=None) -> Optional[EmbarkPlan]:
     """Decide a whole embark. `None` only when no quest here is playable."""
     rng = rng or random.Random()
     notes: list[str] = []
@@ -455,8 +804,28 @@ def plan_embark(town: TownState, store, profile, rng=None,
         basket_cost = provisions.cost(basket, game_dir)
         notes.append(f"basket cut to fit {gold} gold -- see provisions.CUT_ORDER")
     budget = gold - basket_cost
+    # **At most UNLOCK_GOLD_FRACTION of the gold on hand goes on skills**
+    # (Fran, 2026-09-25). A random comp per raid bought 4-5k of Guild skills
+    # every embark against raid income that averaged less, and the wallet
+    # went 17,265 -> 1,185 in one night.
+    cap = int(UNLOCK_GOLD_FRACTION * gold)
+    if budget > cap:
+        notes.append(f"skill budget capped at {cap}g "
+                     f"({UNLOCK_GOLD_FRACTION:.0%} of {gold}g)")
+        budget = cap
+    # Skills are unlocked at the Guild, which opens after 3 quests
+    # (`townplan.BUILDING_GATES`): before then the party goes with what it wears.
+    from bridge.townplan import closed                       # noqa: PLC0415
+    if "guild" in closed(town, game_dir) and budget > 0:
+        notes.append("the Guild is not open yet: no skill unlocks")
+        budget = 0
 
     pool = town.eligible(quest)
+    if quest.quest_type == "kill_boss" and BOSS_MAX_UNDERLEVELED == 0:
+        # The boss rule binds the party SEATED, not only `quest_in_reach`'s
+        # top four: the comp draw seats the cheapest heroes, and fielded
+        # level-0 fodder at the Necromancer (campaign sim, 2026-10-10).
+        pool = [h for h in pool if h.resolve_level >= _boss_level(quest)]
     if len(pool) < PARTY_SIZE:
         notes.append(f"only {len(pool)} heroes are free and under the resolve cap")
     pool, benched = _rested(pool)
@@ -469,6 +838,39 @@ def plan_embark(town: TownState, store, profile, rng=None,
     # each hero the comp's own four skills.
     fieldable = fieldable_comps(town, store, profile, quest, game_dir,
                                 pool=pool)
+    if quest.quest_type != "kill_boss" and quest_in_reach(town, quest):
+        # The same rule binds the party SEATED as `quest_in_reach`'s top
+        # four ("optionally 1 underleveled hero"): the draw seated level-0
+        # fodder on Veteran quests, and those raids were 46% of the
+        # campaign's deaths (campaign sim, 2026-10-11). Only when the
+        # roster CAN meet it; a green roster's fallback is untouched. When no
+        # comp meets it, the comps seating the FEWEST under-level heroes are
+        # kept (stepping down a difficulty instead was worse: E13).
+        need = _quest_level(quest)
+        shorts = [_shortfall([st.hero.resolve_level for st in c[1]], need)
+                  for c in fieldable]
+        limit = max(MAX_UNDERLEVELED, min(shorts, default=0))
+        at_level = [c for c, k in zip(fieldable, shorts) if k <= limit]
+        if at_level and len(at_level) < len(fieldable):
+            notes.append(f"{len(fieldable) - len(at_level)} comp(s) dropped: "
+                         f"more than {limit} hero(es) under level {need}")
+            fieldable = at_level
+    if quest.quest_type == "kill_boss" and fieldable:
+        # **A boss party is the highest level the quest allows** (Fran,
+        # 2026-10-12: *"Boss parties should try to have the max available
+        # level of heroes if possible, for example for apprentice missions go
+        # with fully equipped level 2 heroes if possible"*). The quest's
+        # resolve cap is the most a seat may be; the comps whose seats sum
+        # highest under it are kept, so a level-2 four beats a level-1 four
+        # whenever the roster has one. "If possible": a roster without them
+        # still goes at the quest level, as before.
+        cap = town.resolve_cap(quest.difficulty)
+        totals = [sum(min(st.hero.resolve_level, cap) for st in c[1]) for c in fieldable]
+        top = [c for c, t in zip(fieldable, totals) if t == max(totals)]
+        if len(top) < len(fieldable):
+            notes.append(f"{len(fieldable) - len(top)} comp(s) dropped: a boss "
+                         f"goes at the highest levels the roster has (cap {cap})")
+            fieldable = top
 
     if not fieldable:
         # Nothing curated fits the roster at all. Send the four healthiest and
@@ -489,9 +891,36 @@ def plan_embark(town: TownState, store, profile, rng=None,
     if affordable:
         # THE CHOICE IS A COIN FLIP among the ones that work. Fran's ask, and
         # the reason there is no rollout in this module.
-        name, seats, cost = rng.choice(affordable)
+        # **Weighted toward FEWER unlocks** (Fran, 2026-09-25): still a flip,
+        # but a comp this roster can field as it stands is drawn far more
+        # often than one that needs the Guild. Weight 1 / (1 + unlocks)^2.
+        # Times `party_weight`: invested, rested, one band (2026-09-26).
+        weights = [party_weight(c[1])
+                   / (1 + sum(len(st.unlocks) + (len(st.lacks) if KIT_AWARE else 0)
+                              for st in c[1])) ** 2
+                   for c in affordable]
+        name, seats, cost = rng.choices(affordable, weights=weights)[0]
         notes.append(f"{len(affordable)} of {len(fieldable)} fieldable curated "
-                     f"comps fit the {budget}g skill budget; picked at random")
+                     f"comps fit the {budget}g skill budget; picked at random, "
+                     f"weighted toward fewer unlocks and invested, rested, "
+                     f"one-band parties")
+        # **The flip stays; a draw the raid layer would abandon is re-drawn.**
+        # `veto(quest, seats)` is `bridge/embark_veto.py` -- it asks the same
+        # simulator the survival layer asks mid-raid, and returns a reason
+        # when the drawn party is expected to lose half its heroes. Not a
+        # ranking: the first draw that passes is taken, in flip order.
+        if veto is not None:
+            order = [c for c in affordable if c[0] != name]
+            rng.shuffle(order)
+            for cand in [(name, seats, cost)] + order[:VETO_REDRAWS]:
+                why = veto(quest, cand[1])
+                if not why:
+                    name, seats, cost = cand
+                    break
+                notes.append(f"VETO {cand[0]}: {why}")
+            else:
+                notes.append("every re-draw was vetoed too; keeping the first "
+                             "draw, and the raid layer will price it")
         basket, basket_cost = _basket_for(quest, level, game_dir, seats, gold, notes)
         return EmbarkPlan(quest=quest, comp=name, party=seats, basket=basket,
                           basket_cost=basket_cost, unlocks_cost=cost,

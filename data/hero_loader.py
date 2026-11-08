@@ -89,6 +89,27 @@ def merge_skill_records(records: list[dict]) -> list[dict]:
     return out
 
 
+
+def _num(value, default: float = 0.0) -> float:
+    """A shipped number, or `default` when the file does not hold one.
+
+    `DarkestParser` turns `95%` into 0.95, but a MOD is free to write anything
+    and one of them does: the Fury's `poised_cleave` carries `.crit -%`, a
+    minus with no number behind it. `float('-%')` raises, and because this runs
+    inside the shared skill build, that single typo took down the load for
+    EVERY modded class at once -- four tests red and the whole Workshop corpus
+    unreachable, on one character in one third-party file.
+
+    Shipped data never needs this: the base game's own values all parse. It
+    exists so a third party cannot break the loader, which is the same reason
+    `_hero_class_map` keeps the hand-written rows first and lets discovery
+    fill in behind them.
+    """
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
 class HeroLoader:
     """Load hero definitions from the game install .info.darkest files."""
 
@@ -288,10 +309,10 @@ class HeroLoader:
                 tier = WeaponTier(
                     level=rec.get("level", 0),
                     name=rec.get("name", ""),
-                    atk_bonus=float(rec.get("atk", 0.0)),
+                    atk_bonus=_num(rec.get("atk", 0.0)),
                     dmg_min=dmg_min,
                     dmg_max=dmg_max,
-                    crit_bonus=float(rec.get("crit", 0.0)),
+                    crit_bonus=_num(rec.get("crit", 0.0)),
                     spd_bonus=int(rec.get("spd", 0)),
                 )
                 weapon_tiers.append(tier)
@@ -299,8 +320,8 @@ class HeroLoader:
                 tier = ArmourTier(
                     level=rec.get("level", 0),
                     name=rec.get("name", ""),
-                    dodge=float(rec.get("def", 0.0)),
-                    prot=float(rec.get("prot", 0.0)),
+                    dodge=_num(rec.get("def", 0.0)),
+                    prot=_num(rec.get("prot", 0.0)),
                     hp=int(rec.get("hp", 1)),
                     spd_bonus=int(rec.get("spd", 0)),
                 )
@@ -408,9 +429,9 @@ class HeroLoader:
 
                 sld = SkillLevelData(
                     level=level,
-                    atk=float(rec.get("atk", 0.0)),
-                    dmg_mod=float(rec.get("dmg", 0.0)),
-                    crit=float(rec.get("crit", 0.0)),
+                    atk=_num(rec.get("atk", 0.0)),
+                    dmg_mod=_num(rec.get("dmg", 0.0)),
+                    crit=_num(rec.get("crit", 0.0)),
                     launch=DarkestParser.decode_position_notation(launch_raw),
                     target=target_positions,
                     is_aoe=is_aoe,
@@ -451,7 +472,7 @@ class HeroLoader:
                     # `ignore_guard`; the modded-hero path is the second one and
                     # a Fire's Edge class arrives through it.
                     requires_burning=bool(rec.get("requires_burning", False)),
-                    dmg_per_burn_stack=float(rec.get("dmg_per_burn_stack", 0.0) or 0.0),
+                    dmg_per_burn_stack=_num(rec.get("dmg_per_burn_stack", 0.0) or 0.0),
                     copy_burn_behind=bool(rec.get("copy_burn_behind", False)),
                 )
 
@@ -559,8 +580,8 @@ class HeroLoader:
                 # riposte damage completely unconditionally, no accuracy
                 # roll at all -- every triggered riposte was a guaranteed
                 # hit. Only present for the 3 real riposte-capable classes.
-                riposte_acc = float(rec.get("atk", 0.0))
-                riposte_crit_mod = float(rec.get("crit", 0.0))
+                riposte_acc = _num(rec.get("atk", 0.0))
+                riposte_crit_mod = _num(rec.get("crit", 0.0))
             elif rtype == "skill_selection":
                 # A VALUELESS-FLAG TRAP in reverse: this one has a value, and
                 # the parser gives it as the bareword `False`/`True` (or the
@@ -808,6 +829,7 @@ class HeroLoader:
         actions = 1
         monster_brain_id = "default"
         loot_code = "A"
+        loot_count = 1
         corpse_id = None
         variant = "Apprentice"
         name = enemy_id
@@ -840,8 +862,8 @@ class HeroLoader:
             if rtype == "stats":
                 stats_data = {
                     "hp": int(rec.get("hp", 1)),
-                    "def": float(rec.get("def", 0.0)),
-                    "prot": float(rec.get("prot", 0.0)),
+                    "def": _num(rec.get("def", 0.0)),
+                    "prot": _num(rec.get("prot", 0.0)),
                     "spd": int(rec.get("spd", 0)),
                     "stun_resist": float(rec.get("stun_resist", 0.0)),
                     "poison_resist": float(rec.get("poison_resist", 0.0)),
@@ -861,6 +883,7 @@ class HeroLoader:
                     monster_brain_id = str(brain_id)
             elif rtype == "loot":
                 loot_code = rec.get("code", "A")
+                loot_count = int(rec.get("count", 1) or 1)
             elif rtype == "death_class":
                 corpse_id = rec.get("monster_class_id")
             elif rtype == "wave_spawning":
@@ -879,6 +902,12 @@ class HeroLoader:
                 sk_id = rec.get("id", "")
                 level = rec.get("level", 0)
                 dmg_mod, dmg_min, dmg_max = parse_monster_dmg(rec.get("dmg", 0))
+                # `.dmg 0 0` is a real range -- the skill deals nothing -- and
+                # must not read as "absent", or the executor keeps whatever
+                # band the monster's LAST skill left behind (the Prophet's
+                # mark hit for his 21-42 rubble). Every vanilla monster skill
+                # ships the two-number form or an empty `.dmg`.
+                dmg_is_range = len(str(rec.get("dmg", "")).split()) == 2
                 effects_raw = rec.get("effect", "")
                 effects_list = []
                 if effects_raw:
@@ -918,11 +947,32 @@ class HeroLoader:
                     elif len(heal_parts) == 1 and heal_parts[0]:
                         heal_min = heal_max = int(float(heal_parts[0]))
 
+                # `.move <backward> <forward>` -- the same field, and the same
+                # convention, the hero path parses above. Hardcoded to 0 here for
+                # exactly as long as `.launch` was ignored, and found the same way:
+                # the Necromancer's own strategy is "starts at rank 1 and moves back
+                # with every action", and all three of his skills carry `.move 1 0`.
+                #
+                # 101 of 552 monster skill lines carry a NET self-move across 71
+                # monsters -- the Fuseman falls back three ranks lighting its fuse,
+                # the Cutthroat advances one, and the Fusilier retreats out of rank 1
+                # after the Rushed Shot that rank 1 is the only place it can fire from.
+                move_raw = rec.get("move", "")
+                enemy_move_self = 0
+                if move_raw:
+                    move_parts = str(move_raw).split()
+
+                    def _mv(x):
+                        return int(x) if x.lstrip("-").isdigit() else 0
+
+                    enemy_move_self = (_mv(move_parts[0]) - _mv(move_parts[1])
+                                       if len(move_parts) == 2 else _mv(move_parts[0]))
+
                 sld = SkillLevelData(
                     level=level,
-                    atk=float(rec.get("atk", 0.0)),
+                    atk=_num(rec.get("atk", 0.0)),
                     dmg_mod=dmg_mod,
-                    crit=float(rec.get("crit", 0.0)),
+                    crit=_num(rec.get("crit", 0.0)),
                     launch=DarkestParser.decode_position_notation(str(rec.get("launch", ""))),
                     target=DarkestParser.decode_position_notation(target_raw),
                     is_aoe=is_aoe,
@@ -933,9 +983,9 @@ class HeroLoader:
                     self_effects=[],
                     heal_min=heal_min,
                     heal_max=heal_max,
-                    atk_dmg_min=dmg_min if dmg_min else None,
-                    atk_dmg_max=dmg_max if dmg_max else None,
-                    move_self=0,
+                    atk_dmg_min=dmg_min if (dmg_min or dmg_is_range) else None,
+                    atk_dmg_max=dmg_max if (dmg_max or dmg_is_range) else None,
+                    move_self=enemy_move_self,
                     move_target=0,
                     push=0,
                     pull=0,
@@ -956,7 +1006,7 @@ class HeroLoader:
                     # `ignore_guard`; the modded-hero path is the second one and
                     # a Fire's Edge class arrives through it.
                     requires_burning=bool(rec.get("requires_burning", False)),
-                    dmg_per_burn_stack=float(rec.get("dmg_per_burn_stack", 0.0) or 0.0),
+                    dmg_per_burn_stack=_num(rec.get("dmg_per_burn_stack", 0.0) or 0.0),
                     copy_burn_behind=bool(rec.get("copy_burn_behind", False)),
                 )
                 if sk_id not in skills:
@@ -999,6 +1049,7 @@ class HeroLoader:
             enemy_types=enemy_type_list,
             monster_brain_id=monster_brain_id,
             loot_code=loot_code,
+            loot_count=loot_count,
             corpse_id=corpse_id,
             location="Every Region",
             prefers_front=prefers_front,

@@ -33,7 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 REPO = Path(__file__).resolve().parents[2]
 TESTS = REPO / "tests"
 
-AREAS = ("engine", "env", "data", "bridge", "tools", "training", "suite")
+AREAS = ("engine", "env", "data", "bridge", "campaign", "tools", "training", "suite")
 
 
 def _test_files():
@@ -192,7 +192,7 @@ def test_no_new_source_file_becomes_a_monolith():
         "env/gym_env.py": "obs layout + reward + action mapping",
     }
     offenders = []
-    for d in ("engine", "env", "data", "bridge", "tools"):
+    for d in ("engine", "env", "data", "bridge", "campaign", "tools"):
         for path in sorted((REPO / d).rglob("*.py")):
             rel = path.relative_to(REPO).as_posix()
             n = len(path.read_bytes().decode("utf-8", "replace").splitlines())

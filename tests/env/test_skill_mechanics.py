@@ -36,7 +36,9 @@ FEATURE_NAMES = (
      "mark", "shuffle", "push", "pull", "self_move"]
     + [f"tgt_{b}" for b in STAT_BUCKETS]
     + [f"self_{b}" for b in STAT_BUCKETS]
-    + ["use_limit", "kill", "shield"]
+    + ["use_limit", "kill", "shield", "clear_corpses",
+       "torch_change", "summon", "clears_guard", "clears_control",
+       "unstealth", "bonus_action", "dot_irresistible"]
 )
 
 
@@ -87,6 +89,12 @@ def test_every_payload_feature_is_reachable_by_some_hero_skill():
     # healing *effect*, so her signature skill read as an empty payload).
     EXPECTED_UNREACHABLE = {
         "kill",              # 4 shipped effects, none on a hero skill
+        # Same shape as `kill`, and verified the same way: 71 MONSTER skills
+        # summon and no hero skill does. It is not dead weight -- this payload
+        # also describes the ENEMY capability pool, which is the only place
+        # the observation can say "the thing in front of you makes more of
+        # itself". Before it, a Necromancer read as a weak attacker.
+        "summon",
         "tgt_hp", "self_hp", # no buff carries stat_type max_hp, no effect max_hp_percent
         # Unreachable BY CONSTRUCTION, not by accident: a status-chance buff
         # (`stun_chance`, `bleed_chance`, ...) is an ATTACKER-side bonus that

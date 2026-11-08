@@ -132,6 +132,12 @@ into a wipe.
 
 ## Provisions: what a corridor can do, and the one number that proved it (2026-09-02)
 
+**OVERTURNED 2026-09-26 by a live test:** an item right-clicked on a hero's
+own turn is used and does NOT end the turn (holy water 2 -> 1, the Plague
+Doctor still to act). `cant_use_items_in_battle` is only a UI string. The
+simulator keeps the flag off until a retrain can take the change: enabling
+it must also make item use a FREE action, not a turn. See NEXT.
+
 **Implemented**: items are no longer offered in battle at all
 (`IN_COMBAT_PROVISIONS_ALLOWED = False`), the cure moved to the corridor
 (`ExpeditionSequenceEnv._use_provisions_between_combats`), and **DoTs now cross
@@ -257,6 +263,22 @@ score. An affliction term that lowers afflictions and does not move
 both halves.
 
 ### Open: hallway stress is shipped, unread, and the reading is 4x wide
+
+**Update 2026-09-25: the live logs pick ONE HERO PER TILE.** The bridge prints
+`hero_changed ... stress a -> b` per hero whenever the save moves, and the save
+is written on room entry, so each such event after a corridor walk carries
+exactly what that corridor did. Filtered to corridors with no fight, curio,
+trap or camp in them, 97 events across every `archive/logs/overnight` log:
+**61 changed one hero, 21 changed two**, and 4-hero changes are as rare as the
+town events mixed into the same window. The typical delta is +2 / +3 (the 2.0
+`_fwd` value through quirk multipliers), and the hero varies (Highwayman,
+Crusader, Vestal, Plague Doctor), so it is not always rank 1. Party-wide
+would change all four about a third of the time on a ~5-tile corridor, and it
+essentially never does. The single-hero reading (0.15 per hero per tile) is the
+one to implement; the script is reproducible from the logs
+(`hero_changed` grouped by timestamp, corridor areas only). Still unread by the
+simulator: implementing it changes the training world, so it waits for the next
+retrain rather than being slipped under a live checkpoint.
 
 `rules.json` also ships, in the same object:
 
@@ -1222,6 +1244,32 @@ four `battle_modifier:` surprise flags that every monster file carries.
   the behaviour is right and only the count in the docstring is stale.
 - **`shape_shifter:` (12)**, **`companion: .heal_per_turn_percent` (6)**,
   **`controller: .stress_per_controlled_turn` (3)** — genuinely new subsystems.
+- **`shared_health: .id formless` (12)** -- **UNMODELLED, and it was not on
+  this list until 2026-09-19.** Every other unread monster key here had been
+  counted; this one appeared in no doc and no code. The twelve records are the
+  four Flesh parts (`formless_melee` / `_ranged` / `_guard` / `_weak`) across
+  the three difficulty tiers, and they all name ONE pool. In the game, damage
+  to any part depletes the single pool they share, so "killing" a part does
+  not reduce the boss's remaining health.
+
+  **The simulator gives each part its own bar**, so The Flesh is roughly **4x
+  too durable**: 4 x 51 = 204 effective HP at Champion against a real 51. It
+  is reachable -- all twelve parts sit in the `boss` comp pool, so any run
+  with `boss_quest_p > 0` fights the inflated version. The default is 0.0,
+  which is why nothing has noticed.
+
+  The per-part PROT spread is correct and is what makes the pool matter:
+  `formless_weak` (the Heart) is PROT 0 and `formless_guard` reaches 0.9 on
+  Champion, so WHICH part is struck decides how much of the shared pool the
+  blow removes. Modelling the pool without that spread would miss the fight.
+
+  Not implemented yet: damage lands in five places (`resolution.py:238`,
+  `_dots.py:119` and `:143`, `_afflictions.py:403`, `combat_engine.py:2019`)
+  and `resolution.py` is a pure function with no engine handle, so there is no
+  single post-damage hook to hold the propagation; death routing is split
+  between `_handle_deaths_door` and `_check_deaths_door_dot` too. Plan and
+  falsifier in `NEXT.md`.
+
 - **`captor_empty:` / `captor_full:`** — the Hag/Siren capture mechanic, already
   a declared out-of-scope exclusion.
 
@@ -1770,8 +1818,41 @@ counted as fixes:
   guess. It lands on the same round, so nothing observable moved; what changed
   is that shipped numbers drive it.
 
-**Two readings left OPEN, deliberately — implementing the wrong one is a
-regression:**
+### The shipped flag alone gets three skills wrong (fixed 2026-09-20)
+
+`.is_stall_invalidating` **defaults to TRUE** and is written out only where it
+is false, so a non-damaging skill that carries no tag inherits "invalidating"
+by omission. Three shipped skills do exactly that — Houndmaster's **Guard
+Dog**, Leper's **Revenge**, Plague Doctor's **Emboldening Vapours** — and the
+wiki's `Talk:Stalling` records that the game charges a stall for them anyway,
+proposing the missing condition: **the skill must target an enemy.**
+
+Checked against the shipped files, that single test reproduces every
+documented row, including both "well-known exceptions" untouched:
+
+| skill | flag | ally? | target | invalidates |
+|---|---|---|---|---|
+| ordinary attack | True (default) | no | enemies | **yes** |
+| Jester `solo`, −100% dmg | True (default) | no | enemies | **yes** |
+| MaA `bellow`, −100% dmg | **False** | no | enemies | no |
+| Occultist `disruptive_curse`, −90% | **False** | no | enemies | no |
+| HM `guard_dog` | True (default) | **yes** | allies | no |
+| PD `emboldening_vapours` | True (default) | **yes** | allies | no |
+| Leper `revenge` | True (default) | no | **empty (self)** | no |
+
+`CombatEngine._invalidates_stall` is the gate, and it is two conditions
+because self-targeting and ally-targeting are different in this loader:
+`_is_ally_skill` reads the `@` in the raw `.target` notation, while a pure
+self-buff like Revenge has an EMPTY target list.
+
+**The bug ran in the dangerous direction.** Those three read as invalidating,
+so a simulated party could dodge a stall penalty with moves the real game
+does not accept — and two of the three are pure support, which is precisely
+what a stalling party is casting. Pinned by
+`tests/engine/test_reinforcements.py`.
+
+**ONE reading left open (the second was closed 2026-09-20, below) —
+implementing the wrong one is a regression:**
 
 - **"Enemies that will die from Bleed/Blight next round will not call for
   reinforcements."** Two readings with *opposite* effects. (a) A doomed enemy is
@@ -1781,9 +1862,16 @@ regression:**
   one does not perform it — which delays the wave. `_is_doomed` already exists,
   so either is cheap; neither is evidenced. *Falsifier:* a capture of a stalled
   fight whose last enemy is dying to a DoT, showing whether the wave arrives.
-- **`accelerated` requires ALL living enemies to carry the flag, not ANY.** Kept
-  as ALL on the strength of the key's own name,
-  `stall_round_accelerated_only_*` — "only accelerating enemies remain". The
-  wiki's "some enemies accelerate" describes which monsters carry the flag, not
-  the gate. *Falsifier:* a capture where a mixed board (one accelerator, one
-  ordinary monster) summons on round 2.
+- **~~`accelerated` requires ALL living enemies to carry the flag, not ANY.~~
+  CLOSED 2026-09-20 — ALL, and the wiki says so in as many words.** It was
+  kept as ALL on the strength of the key's own name,
+  `stall_round_accelerated_only_*` ("only accelerating enemies remain"),
+  against the wiki's looser "some enemies accelerate" — which describes which
+  monsters carry the flag, not the gate. The Stalling page's own Accelerated
+  Penalties section resolves it: *"**If all remaining enemies belong to the
+  list below**, then stalling penalties are incurred faster."* The reading
+  the key name implied is the documented one, and no code changed.
+
+  The same page also confirms the accelerated schedule already implemented:
+  a bark after one stalled round with **no stress**, reinforcements on the
+  second.

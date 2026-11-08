@@ -87,7 +87,18 @@ CLOSE_PANEL = ("town", "town_event")
 # was damaged -- but nothing could proceed either, because there is no
 # keyboard way back: ESC opens the pause menu, and its only exits are to the
 # main menu and to the desktop.
-LEAVE_AT = {"butchers_circus": "circus_exit"}
+LEAVE_AT = {"butchers_circus": "circus_exit",
+            # **THE WON RAID'S OWN BANNER, and the walk home ran into it for
+            # the same reason it ran into `hunger`.** `act` presses this
+            # inside the raid, but the banner is a modal shown once and it is
+            # still up when the walk starts -- so `to_town` met a screen it
+            # had no move for and ended three iterations in four seconds
+            # each, on a quest the party had just COMPLETED (2026-09-21,
+            # Fran's campaign). Homeward, the answer is never ambiguous:
+            # "Return to Hamlet" is what this walk means. `Continue Raid`
+            # stays `act`'s to choose, because only the raid layer knows
+            # whether there is loot left worth the torch.
+            "quest_complete": "quest_return_to_hamlet"}
 
 # **THE WALK HAS A DIRECTION, and for a long time it only had one.** `ADVANCE`
 # is the FORWARD control on each screen, and `to_town` walked it toward the
@@ -141,7 +152,10 @@ TOWN_SCREENS = ("hamlet", "town", "town_event", "estate_map", "provision")
 # from every other reference by 0.700, far above the 0.35 threshold. Anything
 # under `captures/screens/<name>.png` is auto-registered, so adding a building
 # is a capture plus a name here.
-BUILDING_SCREENS: tuple = ("stage_coach_panel",)
+# "guild_panel" banked 2026-09-25 from a live frame: the Guild opened and
+# was refused as "could not confirm", because only the coach was banked.
+BUILDING_SCREENS: tuple = ("stage_coach_panel", "guild_panel", "abbey_panel",
+                           "blacksmith_panel")
 
 # Long enough that a click does not land inside the reveal animation on the
 # progression page, which is where the first live walk lost one.
@@ -254,6 +268,7 @@ def walk(win, backend, *, until: Callable[[str], bool], say=print,
     seen: list = []
     stuck_on, stuck_count, unknown = "", 0, 0
     bought: set = set()
+    hunger_tries = 0
     for step in range(budget):
         here = _look(win)
         if here and (not seen or seen[-1] != here):
@@ -299,8 +314,40 @@ def walk(win, backend, *, until: Callable[[str], bool], say=print,
         elif here in LEAVE_AT:
             point = getattr(resolved, LEAVE_AT[here])
             what = f"leave {here}"
-        elif here in CLOSE_PANEL:
-            point, what = resolved.town_close_panel, "close the activity log"
+        elif here in CLOSE_PANEL or here.endswith("_panel"):
+            # **EVERY BUILDING PANEL CLOSES BY THE SAME X.** DD draws one
+            # close glyph for all of them -- `townlayout.CLOSE_GLYPH_CENTRE`
+            # records that `activity_log_layout.close_pos` and
+            # `building_base_layout.close_pos` are both (1496, 144) -- so the
+            # walk does not need a reference per building to get out of one.
+            #
+            # Measured 2026-09-22: a run stopped mid-town-visit left the
+            # stage coach open, and three iterations died in under ten
+            # seconds each on "no move known for 'stage_coach_panel'". The
+            # suffix is what makes the guild, abbey and tavern panels free
+            # rather than three more entries to remember.
+            point, what = resolved.town_close_panel, f"close {here}"
+        elif here == "hunger":
+            # **THE HUNGER CHECK FIRES IN THE DUNGEON AND THE WALK HOME RUNS
+            # STRAIGHT INTO IT.** `act.ActRunner._answer_hunger` has answered
+            # it since the panel was measured, but that is the RAID layer:
+            # `to_town` has its own screen table and hunger was in none of it,
+            # so the walk stopped dead with "no move known for 'hunger'".
+            # Measured 2026-09-21 on Fran's own campaign -- three iterations
+            # ended in four seconds each, having played 379 actions into the
+            # raid before that.
+            #
+            # **Eat first, refuse second**, which is `_answer_hunger`'s order
+            # and for its reason: eating is the answer whenever food is
+            # available, and asking for it without food costs nothing. The
+            # points are `layout`'s measured ones rather than a second
+            # reading of the same panel.
+            from bridge.layout import (HUNGER_EAT,          # noqa: PLC0415
+                                       HUNGER_REFUSE)
+            eating = hunger_tries == 0
+            point = resolved.at(HUNGER_EAT if eating else HUNGER_REFUSE)
+            what = "eat" if eating else "refuse (eating did not take)"
+            hunger_tries += 1
         elif here in ADVANCE:
             point, what = resolved.raid_results_next, ADVANCE[here]
         else:
@@ -541,7 +588,13 @@ def _panel_is_open(win) -> bool:
     # recognise. That is deliberately conservative: it costs a refusal on a
     # panel that did open, and it prevents a sequence of clicks landing on a
     # town nobody meant to click.
-    return here in BUILDING_SCREENS
+    if here in BUILDING_SCREENS:
+        return True
+    # **Or its title plate**, which a speech bubble or a changed list cannot
+    # hide (2026-09-23: the coachman's "Let's do" over the coach panel failed
+    # the whole-frame match and the town visit was skipped). Still POSITIVE
+    # evidence of a banked panel, never a guess from an unknown frame.
+    return screen.panel_title_match(img) in BUILDING_SCREENS
 
 
 def _on_town_screen(win) -> bool:
@@ -891,7 +944,8 @@ def _trade_in_open_exchange(win, backend, resolved, profile, trade, here, *,
 
 
 def visit_stage_coach(win, backend, profile, *, store=None, say=print,
-                      act: bool = False, roster_room: int = 2) -> list:
+                      act: bool = False,
+                      roster_room: Optional[int] = None) -> list:
     """Trade, upgrade and recruit, in that order, verifying each against the save.
 
     **The order is a dependency, not a preference.** A trade pays for an
@@ -927,7 +981,7 @@ def visit_stage_coach(win, backend, profile, *, store=None, say=print,
             upgrades_file = candidate
 
     advice = townplan.advise(town, store=store, upgrades_file=upgrades_file,
-                             roster_room=roster_room)
+                             roster_room=roster_room, sanitarium_spends=False)
     for line in advice.lines():
         say(f"  [town]{line}")
     if advice.empty:
@@ -947,6 +1001,11 @@ def visit_stage_coach(win, backend, profile, *, store=None, say=print,
     # nothing opened, and the guard below correctly refused -- having spent a
     # blind click into a live game to find that out.
     close_exchange(win, backend, resolved, say=say, act=act)
+    # **The class-and-level cap first**, from the bare Hamlet where the
+    # roster tab opens (Fran, 2026-09-26).
+    if advice.dismissals:
+        done += dismiss_surplus(win, backend, resolved, profile,
+                                advice.dismissals, say=say, act=act)
     already = _panel_is_open(win)
     if already:
         say("  [town] the stage coach is already open")
@@ -986,11 +1045,22 @@ def visit_stage_coach(win, backend, profile, *, store=None, say=print,
     # `act.plan_open_upgrades`. Only bother when something is actually going
     # to be bought; it is a view switch, but a pointless click is still a
     # click into a live game.
-    if advice.purchases:
+    # **Only the COACH's own trees are bought here.** Since PLAYBOOK 7.4 the
+    # plan also names guild, blacksmith and sanitarium ranks, and live
+    # 2026-09-24 this loop clicked "buy guild.cost.a" and "buy
+    # sanitarium.slots.a" at points INSIDE THE COACH PANEL -- whatever coach
+    # control sits there. Each building needs its own panel measured before
+    # its ranks may be bought; until then they are reported, not sent.
+    coach_buys = [pu for pu in advice.purchases
+                  if pu.node.tree_id.split(".")[0] == "stage_coach"]
+    # The other buildings' ranks are bought AFTER the coach closes, each in
+    # its own panel -- see `buy_building_upgrades`.
+    other_buys = [pu for pu in advice.purchases if pu not in coach_buys]
+    if coach_buys:
         _send(backend, act_mod.plan_open_upgrades(resolved), act=act, say=say)
 
     # 1. trades, then 2. the upgrades they pay for
-    for purchase in advice.purchases:
+    for purchase in coach_buys:
         # **The trade happens on the TOWN screen, not in the panel.** The
         # exchange toggle sits on the Hamlet's currency bar, which the coach
         # panel covers -- so the panel is closed for the trades and reopened
@@ -1010,15 +1080,39 @@ def visit_stage_coach(win, backend, profile, *, store=None, say=print,
             if stop:
                 break
         if stop:
-            # **Return, do not fall through to the hires.** Breaking out of
-            # the purchase loop alone left the coach panel closed -- it is
-            # closed for a trade, because the exchange toggle is on the bar
-            # underneath it -- and the hire drags then went into a live
-            # Hamlet. Every one was correctly reported UNCONFIRMED, and none
-            # of them should have been sent at all.
-            _send(backend, act_mod.plan_close_building(resolved),
-                  act=act, say=say)
-            return done
+            # **STOP BUYING, BUT DO NOT ABANDON THE HIRES.** The purchases
+            # after this one were costed against a wallet that no longer
+            # exists, so none of them may be sent -- but a hire costs NOTHING
+            # and is the most valuable thing in the visit.
+            #
+            # This used to return. The reason given was real: the panel is
+            # closed for a trade (the exchange toggle sits on the bar
+            # underneath it), so the hire drags went into a live Hamlet. The
+            # answer to a closed panel is to open it, not to skip the hires.
+            #
+            # Measured 2026-09-22 on Fran's campaign: the plan wanted
+            # `stage_coach.numrecruits.c` at 15 crest + 16 deed against a
+            # wallet holding ONE deed, the trade for it misfired, and the
+            # visit returned -- so `abomination` and `plague_doctor`, both
+            # free and both already chosen, were never hired. That happened
+            # every week of the campaign. Fran: *"you didnt recruit anyone as
+            # i told, so now you're stuck with a limited pool of characters
+            # and all stressed out"*, and *"if you dont have enough heirlooms
+            # to unlock level, the heirlooms+upgrades step is useless"*.
+            say("  [town] a trade misfired - skipping the rest of the "
+                "upgrades and going straight to the hires")
+            if not _panel_is_open(win):
+                _send(backend,
+                      act_mod.plan_open_building("stage_coach", resolved),
+                      act=act, say=say)
+                time.sleep(PANEL_OPEN_SETTLE)
+            if not _panel_is_open(win):
+                done.append(Did("re-open the stage coach for the hires",
+                                sent=True, confirmed=False,
+                                why="the panel did not come back, so the "
+                                    "hire drags would land on the Hamlet"))
+                return done
+            break
         if purchase.trades:
             reopened = _send(backend,
                              act_mod.plan_open_building("stage_coach", resolved),
@@ -1080,6 +1174,161 @@ def visit_stage_coach(win, backend, profile, *, store=None, say=print,
             taken.append(hire.index)
 
     _send(backend, act_mod.plan_close_building(resolved), act=act, say=say)
+    if other_buys:
+        time.sleep(PANEL_OPEN_SETTLE)
+        done += buy_building_upgrades(win, backend, resolved, profile,
+                                      other_buys, say=say, act=act)
+    if advice.treatments:
+        time.sleep(PANEL_OPEN_SETTLE)
+        done += treat_heroes(win, backend, resolved, profile,
+                             advice.treatments, say=say, act=act)
+    if getattr(advice, "nurture", ()):
+        time.sleep(PANEL_OPEN_SETTLE)
+        done += nurture_visit(win, backend, resolved, profile,
+                              advice.nurture, say=say, act=act)
+    return done
+
+
+def nurture_visit(win, backend, resolved, profile, buys, *, say=print,
+                  act: bool = False) -> list:
+    """Buy the nurture hero's ranks, Guild first, then the Blacksmith.
+
+    One hero per visit (`townplan.plan_nurture`). Each rank is a click on the
+    building's row for that hero, witnessed by the wallet; the first rank the
+    wallet does not confirm stops that building, because every later rank of
+    the same tree needs it."""
+    from types import SimpleNamespace                  # noqa: PLC0415
+    from bridge import act as act_mod                  # noqa: PLC0415
+    from bridge import townlayout as TL                # noqa: PLC0415
+
+    done: list = []
+    if not buys:
+        return done
+    hero = SimpleNamespace(guid=buys[0].guid, hero_class=buys[0].hero_class)
+    for building in ("guild", "blacksmith"):
+        mine = [b for b in buys if b.building == building]
+        if not mine:
+            continue
+        if building == "blacksmith" and not TL.BLACKSMITH_MEASURED:
+            for b in mine:
+                done.append(Did(f"nurture {b.label()}", sent=False,
+                                why="the Blacksmith's rank buttons are not "
+                                    "measured (BLACKSMITH_MEASURED)"))
+            continue
+        for b in mine:
+            say(f"  [town] NURTURE {b.label()}")
+        if not act:
+            done.append(Did(f"nurture at the {building}", sent=False,
+                            why="not armed"))
+            continue
+        opened = _send(backend, act_mod.plan_open_building(building, resolved),
+                       act=act, say=say)
+        time.sleep(PANEL_OPEN_SETTLE)
+        if not opened or not _panel_is_open(win):
+            note = _bank_panel_frame(win)
+            if not _on_town_screen(win):
+                _send(backend, act_mod.plan_close_building(resolved),
+                      act=act, say=say)
+            done.append(Did(f"open the {building}", sent=bool(opened),
+                            why=f"could not confirm the panel opened{note}"))
+            continue
+        put = _put_hero_in_guild(win, backend, resolved, profile, hero,
+                                 say=say, act=act, cursor={})
+        done.append(put)
+        if put.confirmed:
+            for b in mine:
+                before = _wallet(profile)
+                if building == "guild":
+                    row = _guild_row(b.hero_class, b.tree)
+                    plan = (act_mod.plan_buy_skill(row, resolved, rank=b.index + 1)
+                            if row is not None else None)
+                else:
+                    plan = act_mod.plan_buy_gear(0 if b.tree == "weapon" else 1,
+                                                 b.index, resolved)
+                if plan is None:
+                    done.append(Did(f"nurture {b.label()}",
+                                    why="no row for that tree"))
+                    break
+                sent = _send(backend, plan, act=act, say=say)
+                after = _await(lambda: _wallet(profile), before) if sent else before
+                ok = sent and after != before
+                why = "" if ok else "the wallet did not move" + _bank_panel_frame(win)
+                done.append(Did(f"nurture {b.label()}", sent=sent, confirmed=ok,
+                                why=why))
+                if not ok:
+                    break
+        # Close until the Hamlet is back: with a hero in the slot one close
+        # was not enough (live 2026-09-28: the embark then found the screen
+        # UNKNOWN and the iteration was lost).
+        for _close in range(3):
+            _send(backend, act_mod.plan_close_building(resolved), act=act, say=say)
+            time.sleep(PANEL_OPEN_SETTLE)
+            if _on_town_screen(win):
+                break
+    return done
+
+
+def buy_building_upgrades(win, backend, resolved, profile, purchases, *,
+                          say=print, act: bool = False) -> list:
+    """Buy guild / blacksmith / sanitarium / ... ranks, each in its OWN panel.
+
+    Live 2026-09-24 these ranks were clicked at points inside the COACH panel
+    and were gated off after that. The geometry itself was never the issue:
+    every building draws its trees from the one `building_base_layout`, which
+    is what `townlayout.upgrade_node` derives from and what was verified on
+    the coach. What was wrong was the panel. So each building is opened,
+    confirmed open, its crest clicked to draw the trees, and each rank bought
+    against the wallet. The first rank the wallet does not confirm stops that
+    building: a click that bought nothing is the geometry disagreeing, and the
+    next click would repeat it. Ranks needing an heirloom trade are left for
+    the coach's exchange flow (reported, not sent).
+    """
+    from bridge import act as act_mod                  # noqa: PLC0415
+
+    done: list = []
+    by_building: dict = {}
+    for pu in purchases:
+        by_building.setdefault(pu.node.tree_id.split(".")[0], []).append(pu)
+    for building, buys in by_building.items():
+        payable = [pu for pu in buys if not pu.trades]
+        for pu in buys:
+            if pu.trades:
+                done.append(Did(f"buy {pu.node.label()}",
+                                why="needs an heirloom trade first - not sent"))
+        if not payable:
+            continue
+        if not _on_town_screen(win):
+            _send(backend, act_mod.plan_close_building(resolved), act=act, say=say)
+            time.sleep(PANEL_OPEN_SETTLE)
+        opened = _send(backend, act_mod.plan_open_building(building, resolved),
+                       act=act, say=say)
+        if not opened:
+            done.append(Did(f"open the {building}", why="not sent"))
+            continue
+        time.sleep(PANEL_OPEN_SETTLE)
+        if act and not _panel_is_open(win):
+            note = _bank_panel_frame(win)
+            if not _on_town_screen(win):
+                _send(backend, act_mod.plan_close_building(resolved),
+                      act=act, say=say)
+            done.append(Did(f"open the {building}", sent=True, confirmed=False,
+                            why=f"could not confirm the panel opened{note}"))
+            continue
+        _send(backend, act_mod.plan_open_upgrades(resolved), act=act, say=say)
+        for purchase in payable:
+            before = _wallet(profile)
+            sent = _send(backend,
+                         act_mod.plan_buy_upgrade(purchase, _tree_index(purchase.node),
+                                                  resolved),
+                         act=act, say=say)
+            after = _await(lambda: _wallet(profile), before) if sent else before
+            ok = sent and after != before
+            done.append(Did(purchase.node.label(), sent=sent, confirmed=ok,
+                            why="" if ok else "the wallet did not move"))
+            if sent and not ok:
+                break
+        _send(backend, act_mod.plan_close_building(resolved), act=act, say=say)
+        time.sleep(PANEL_OPEN_SETTLE)
     return done
 
 
@@ -1325,6 +1574,32 @@ def _roster_portrait_refs(game_dir: str) -> dict:
     return {k: tuple(v) for k, v in out.items()}
 
 
+def drawn_roster(town):
+    """The heroes the roster list actually DRAWS, in the order it draws them.
+
+    **A hero standing in the party bar is not in the list.** DD moves them
+    out of it, so a roster of 11 with 3 seated draws exactly 8 -- which is
+    also `ROSTER_ROWS_VISIBLE`, so nothing can scroll and the chevron is not
+    even drawn.
+
+    Everything here used to reason about `town.heroes`, the SAVE order, and
+    that is a different sequence. Measured live 2026-09-22 on Fran's
+    campaign: save rows 3, 6 and 9 (jester, leper, hellion) were in the
+    party, the list drew the remaining eight with Dismas -- save row 0 -- in
+    its top row, and `_roster_offset` matched the 11-long class sequence
+    against 8 drawn portraits and reported **offset 2**. The seat for save
+    row 0 was then refused as "not on screen", the scroll could not move a
+    list that was already at its top, and the night looped.
+
+    The failure is worse than a refusal when the alignment happens to pass:
+    this function's own warning is that a wrong offset does not miss, it
+    drags a DIFFERENT hero -- which is how a Leper reached a back rank,
+    reported by Fran as *"the seating is seating a leper on the back which is
+    really sus"* while the plan had correctly put him at rank 1.
+    """
+    return [h for h in town.heroes if not getattr(h, "in_party", False)]
+
+
 def _roster_offset(win, town, game_dir=None):
     """Which save row is drawn in the list's TOP row, or None if unreadable.
 
@@ -1340,7 +1615,7 @@ def _roster_offset(win, town, game_dir=None):
     if game_dir is None:
         from bridge.townplan import GAME_DIR          # noqa: PLC0415
         game_dir = GAME_DIR
-    classes = [h.hero_class for h in town.heroes]
+    classes = [h.hero_class for h in drawn_roster(town)]
     if len(classes) <= ROSTER_ROWS_VISIBLE:
         return 0                                      # nothing can scroll
     refs = _roster_portrait_refs(str(game_dir))
@@ -1442,52 +1717,144 @@ def _roster_strip(win, resolved):
     return np.asarray(img[y0:y1, x0:x1], dtype=float)
 
 
+def _roster_pitch_px(strip) -> Optional[float]:
+    """One roster row, in the strip's own pixels (the strip is frame-sized)."""
+    from bridge import townlayout as TL              # noqa: PLC0415
+    first = TL.roster_portrait(0)
+    last = TL.roster_portrait(ROSTER_ROWS_VISIBLE - 1)
+    if strip is None or first is None or last is None:
+        return None
+    span = (last[1] - first[1]) + 0.06              # the strip's crop margins
+    return strip.shape[0] * (last[1] - first[1]) / (ROSTER_ROWS_VISIBLE - 1) / span
+
+
+def _rows_moved(before, after, max_rows: int = 3) -> Optional[int]:
+    """How many rows the list scrolled DOWN between two strips, or None.
+
+    A one-row scroll shifts every drawn row up by exactly one pitch, so rows
+    1-7 of `before` reappear as rows 0-6 of `after`. The k whose shifted
+    overlap matches best is the answer -- an identity-free witness that a
+    counted scroll moved exactly as many rows as it was clicked. None when the
+    frames are missing or nothing matches well (a panel over the list, a
+    mid-animation grab)."""
+    import numpy as np                               # noqa: PLC0415
+    if before is None or after is None or before.shape != after.shape:
+        return None
+    pitch = _roster_pitch_px(before)
+    if not pitch:
+        return None
+    best_k, best = None, None
+    for k in range(0, max_rows + 1):
+        cut = int(round(k * pitch))
+        if cut >= before.shape[0] - 8:
+            break
+        a, b = before[cut:], after[:before.shape[0] - cut]
+        diff = float(np.abs(a - b).mean())
+        if best is None or diff < best:
+            best_k, best = k, diff
+    if best is None or best > ROWS_MOVED_MAX_DIFF:
+        return None
+    return best_k
+
+
+#: Mean per-channel difference under which a shifted overlap counts as the
+#: same rows. Set from live frames (see the changelog, 2026-09-26).
+ROWS_MOVED_MAX_DIFF = 6.0
+
+
+#: Measured live 2026-09-26 on the Hamlet roster: one chevron click scrolls a
+#: row in ~0.58 s, and clicks sent 0.1 s apart QUEUE -- five of them moved
+#: exactly five rows in 2.0 s. The old path waited `TOWN_PANEL_SETTLE` plus
+#: `ROSTER_SCROLL_SETTLE`, 1.8 s a row, which on a 100-hero roster made one
+#: lookup a two-minute scroll and a town visit forty minutes.
+ROSTER_CLICK_GAP = 0.1
+ROSTER_SETTLE_FAST = 0.75
+#: Rows per verified burst. `_rows_moved` compares the overlap of two strips
+#: of eight rows, so a burst must leave some overlap to witness.
+ROSTER_CHUNK = 6
+
+
+def scroll_roster_by(win, backend, resolved, clicks: int, *, say=print,
+                     act: bool = False) -> "Did":
+    """Scroll DOWN exactly `clicks` rows from wherever the list is.
+
+    Counted, and now WITNESSED per burst: up to `ROSTER_CHUNK` clicks are
+    sent `ROSTER_CLICK_GAP` apart, and after they settle `_rows_moved` must
+    read exactly that many rows. A short burst (a dropped click) is topped
+    up; an unreadable strip or an over-long move refuses, because a list at
+    the wrong offset seats and equips the wrong hero. Pairs with
+    `force_roster_to_top`, which makes "wherever" mean the top.
+    """
+    from bridge import townlayout as TL               # noqa: PLC0415
+
+    label = f"scroll the roster down {clicks}"
+    if clicks <= 0:
+        return Did(label, sent=False, confirmed=True, why="nothing to do")
+    if not act:
+        say(f"  [town] WOULD scroll the roster down {clicks}")
+        return Did(label, why="not armed")
+    pt = resolved.at(TL.roster_scroll(True))
+    if pt is None or not TL.ROSTER_SCROLL_MEASURED:
+        return Did(label, why="no verified roster scroll arrow")
+    left, retries = int(clicks), 0
+    while left > 0:
+        burst = min(ROSTER_CHUNK, left)
+        before = _roster_strip(win, resolved)
+        for _ in range(burst):
+            backend.click(pt)
+            time.sleep(ROSTER_CLICK_GAP)
+        time.sleep(ROSTER_SETTLE_FAST)
+        moved = _rows_moved(before, _roster_strip(win, resolved),
+                            max_rows=min(ROSTER_CHUNK + 1, ROSTER_ROWS_VISIBLE - 1))
+        if moved is None or moved > burst:
+            return Did(label, sent=True, confirmed=False,
+                       why=f"could not witness the scroll (read {moved} of "
+                           f"{burst} rows)")
+        if moved < burst:
+            retries += 1
+            if retries > 3:
+                return Did(label, sent=True, confirmed=False,
+                           why="the list stopped moving before the target row")
+        left -= moved
+    return Did(label, sent=True, confirmed=True)
+
+
 def force_roster_to_top(win, backend, resolved, town, *, say=print,
                         act: bool = False) -> "Did":
-    """Click UP until the list stops moving, so the offset is 0 by force.
+    """Click UP until the list cannot move, so the offset is 0 by force.
 
-    **`_roster_offset` cannot always be read, and that is not a bug in it.**
-    It matches the visible portraits against the class art and refuses a
-    near-tie; a roster with duplicated classes produces exactly that. Measured
-    on a 21-hero campaign carrying two each of bounty hunter, crusader,
-    duelist, highwayman, man-at-arms, plague doctor, runaway and vestal --
-    eight ambiguous pairs, and every seat came back "cannot read the list
-    offset off the portraits". Loosening the margin there would not answer the
-    question, it would guess at it, and a wrong offset does not miss: it seats
-    a different hero.
-
-    So this stops asking where the list is and MOVES it somewhere known. The
-    same trick the save list needed: an extreme is the one position that can
-    be reached without knowing the current one.
-
-    Over-clicking is safe by the list's own design -- the chevron is only
-    drawn when it can act, so a click at the end is a no-op rather than a
-    misclick (`scroll_roster_to` relies on the same fact). The stop condition
-    is therefore the STRIP not changing, which is what "already at the top"
-    looks like, and the bound is the roster size.
+    **`_roster_offset` cannot always be read**, and a roster with repeated
+    classes produces exactly that: so this stops asking where the list is and
+    MOVES it somewhere known. Over-clicking is safe by the list's own design
+    -- the chevron is only drawn when it can act -- so the clicks go in one
+    fast burst (enough for the whole roster) and one more click afterwards
+    must move NOTHING, which is what "at the top" looks like.
     """
-    from bridge import act as act_mod                 # noqa: PLC0415
+    from bridge import townlayout as TL               # noqa: PLC0415
 
     label = "scroll the roster to the top"
     if not act:
         say("  [town] WOULD scroll the roster to the top")
         return Did(label, why="not armed")
-    plan = act_mod.plan_scroll_roster(False, resolved)      # False == up
-    if not plan.actionable:
-        return Did(label, why=plan.refusal)
-    before = _roster_strip(win, resolved)
-    if before is None:
+    pt = resolved.at(TL.roster_scroll(False))
+    if pt is None or not TL.ROSTER_SCROLL_MEASURED:
+        return Did(label, why="no verified roster scroll arrow")
+    if _roster_strip(win, resolved) is None:
         return Did(label, why="cannot see the roster list")
-    for _ in range(len(town.heroes) + 2):
-        _send(backend, plan, act=True, say=say)
-        time.sleep(ROSTER_SCROLL_SETTLE)
+    # Bursts of up-clicks until one moves NOTHING. Cost scales with how far
+    # down the list is, not with the roster's length: ~1.4 s a burst.
+    for _burst in range(len(getattr(town, "heroes", ()) or ()) // ROSTER_CHUNK + 3):
+        before = _roster_strip(win, resolved)
+        for _ in range(ROSTER_CHUNK):
+            backend.click(pt)
+            time.sleep(ROSTER_CLICK_GAP)
+        time.sleep(ROSTER_SETTLE_FAST)
         after = _roster_strip(win, resolved)
-        if after is None:
+        if before is None or after is None:
             return Did(label, sent=True, confirmed=False,
                        why="lost sight of the roster list mid-scroll")
         if not _bar_moved(before, after):
             return Did(label, sent=True, confirmed=True, why="at the top")
-        before = after
     return Did(label, sent=True, confirmed=False,
                why="the list never stopped moving")
 
@@ -1496,22 +1863,38 @@ def _bring_into_view(win, backend, resolved, town, index: int, *, say=print,
                      act: bool = False):
     """Scroll the least that puts save row `index` on screen. Returns
     `(offset, Did or None)` -- the offset is None when it could not be read."""
-    at = _roster_offset(win, town)
-    if at is None:
-        # The portraits could not say where the list is -- duplicated classes
-        # make that the ORDINARY case on a full roster. Put it somewhere the
-        # answer is known instead of guessing.
-        got = force_roster_to_top(win, backend, resolved, town, say=say,
-                                  act=act)
-        if not got.confirmed:
-            return None, got
-        at = 0
-    if at <= index < at + ROSTER_ROWS_VISIBLE:
-        return at, None
-    want = index if index < at else index - ROSTER_ROWS_VISIBLE + 1
-    want = max(0, min(want, len(town.heroes) - ROSTER_ROWS_VISIBLE))
-    got = scroll_roster_to(win, backend, resolved, town, want, say=say, act=act)
-    return _roster_offset(win, town), got
+    # **ANCHOR, DO NOT MEASURE. PORTRAIT MATCHING IS NOT SOUND ON A MODDED
+    # INSTALL.** `_roster_offset` compares the drawn portraits against the
+    # art shipped in the game files, and `Amara's Character UI` -- one of the
+    # 17 mods on Fran's save -- replaces that art. Measured on the Hamlet
+    # 2026-09-22: the eight rows scored 26 to 57 mean levels, with runner-up
+    # gaps as small as 0.02 against a required margin of 2.0, and the matcher
+    # confidently named a `flagellant` that is not on the roster. It reported
+    # offset 2 for a list whose up-chevron was not drawn, which is the list
+    # telling us it is at its top.
+    #
+    # A confident wrong offset is the worst outcome available here: it does
+    # not miss, it drags a DIFFERENT hero, and the party bar confirms it.
+    # That is how a Leper reached a back rank -- Fran: *"the seating is
+    # seating a leper on the back which is really sus"* -- with the plan
+    # correctly putting him at rank 1.
+    #
+    # `force_roster_to_top` needs no art: it clicks up until the STRIP stops
+    # changing, which is what "already at the top" looks like, and the
+    # chevron is only drawn when it can act so over-clicking is a no-op. From
+    # there the offset is 0 by construction and any scroll down is counted
+    # rather than re-read.
+    got = force_roster_to_top(win, backend, resolved, town, say=say, act=act)
+    if not got.confirmed:
+        return None, got
+    if index < ROSTER_ROWS_VISIBLE:
+        return 0, got
+    want = min(index - ROSTER_ROWS_VISIBLE + 1,
+               max(0, len(drawn_roster(town)) - ROSTER_ROWS_VISIBLE))
+    scrolled = scroll_roster_by(win, backend, resolved, want, say=say, act=act)
+    if not scrolled.confirmed:
+        return None, scrolled
+    return want, scrolled
 
 
 
@@ -1527,6 +1910,50 @@ def _drag(backend, resolved, src, dst, *, act: bool, say) -> bool:
     time.sleep(DRAG_SETTLE)
     _park_cursor(backend, resolved)
     return ok
+
+
+#: How textured a party slot's portrait patch has to be to count as FILLED.
+#
+# **"The bar did not change" could never tell an empty slot from a failed
+# drag**, and that ambiguity is what hid the real bug for a whole night: the
+# clear left heroes on the bar, the embark planner then picked heroes who
+# were ON it, and those cannot be dragged out of a roster list that does not
+# draw them. Measured 2026-09-22 with the party bar filled and then emptied,
+# same slots, same screen:
+#
+#     empty     mean 15.2  std  7.9   (all four identical -- it is frame art)
+#     occupied  mean 32.5-74.5  std 42.0-69.5
+#
+# The STD is the discriminator rather than the mean: an empty slot is flat
+# frame, a filled one carries a portrait. 20 sits five times clear of both
+# sides, and the mean is deliberately not used -- a dark portrait and a lit
+# frame can share one.
+PARTY_SLOT_TEXTURE = 20.0
+PARTY_SLOT_PATCH = 20
+
+
+def party_slot_filled(win, resolved, index: int) -> Optional[bool]:
+    """Is party slot `index` holding a hero? None when it cannot be read."""
+    from bridge import townlayout as TL                # noqa: PLC0415
+
+    try:
+        import numpy as np                             # noqa: PLC0415
+        from bridge import screen as screen_mod        # noqa: PLC0415
+
+        point = resolved.at(TL.party_portrait(index))
+        img = screen_mod.grab(win)
+        if point is None or img is None:
+            return None
+        ox, oy = resolved.win.client_origin
+        cx, cy = point[0] - ox, point[1] - oy
+        pad = PARTY_SLOT_PATCH
+        patch = np.asarray(img, dtype=float)[cy - pad:cy + pad,
+                                             cx - pad:cx + pad, :3]
+        if patch.size == 0:
+            return None
+        return float(patch.std()) >= PARTY_SLOT_TEXTURE
+    except Exception:                                  # noqa: BLE001
+        return None
 
 
 def clear_party(win, backend, resolved, town, *, say=print,
@@ -1553,12 +1980,534 @@ def clear_party(win, backend, resolved, town, *, say=print,
         if src is None:
             done.append(Did(f"clear party slot {index}", why="no such slot"))
             continue
-        before = _party_bar(win, resolved)
+        # **ASK WHETHER IT IS EMPTY, NOT WHETHER SOMETHING MOVED.** A slot
+        # that was already empty and a drag that failed look identical to
+        # `_bar_moved`, and the difference is a raid: heroes left on the bar
+        # are not drawn in the roster list, so the seats for them are refused
+        # and the party goes out short. Measured 2026-09-22: the planner
+        # picked guids 7 and 8 while `in_party` held [2, 8, 7, 27], and both
+        # seats failed every iteration.
+        filled = party_slot_filled(win, resolved, index)
+        if filled is False:
+            done.append(Did(f"clear party slot {index}", sent=False,
+                            confirmed=True, why="already empty"))
+            continue
         sent = _drag(backend, resolved, src, park, act=act, say=say)
-        moved = _bar_moved(before, _party_bar(win, resolved)) if sent else False
-        done.append(Did(f"clear party slot {index}", sent=sent, confirmed=moved,
-                        why="" if moved else "the bar did not change "
-                                             "(an empty slot looks like this)"))
+        time.sleep(STEP_SETTLE)
+        after = party_slot_filled(win, resolved, index)
+        if after is None:
+            # Cannot see it: fall back to the old movement test rather than
+            # claim either way.
+            done.append(Did(f"clear party slot {index}", sent=sent,
+                            confirmed=False,
+                            why="could not read the slot to confirm"))
+            continue
+        done.append(Did(f"clear party slot {index}", sent=sent,
+                        confirmed=not after,
+                        why="" if not after else "the hero is STILL on the bar"))
+    return done
+
+
+def learn_roster_rows(win, backend, resolved, profile, *, rows=None,
+                      say=print, act: bool = False) -> dict:
+    """Which hero sits on which roster row, learned by ASKING THE GAME.
+
+    **Every way of inferring this is broken on Fran's install.** The list
+    order is not the save's (Ceauce is save index 5 and draws at row 3), the
+    portrait matcher that used to recover it compares against art that
+    `Amara's Character UI` replaces, and the save carries no row. So this
+    stops inferring and runs an experiment: drag a row onto the bar, read
+    `persist.roster.json` to see whose `in_party` just turned on, and put
+    them back.
+
+    That is the one channel the mods cannot touch -- the save records the
+    party, and it is the same evidence `clear_party` and the seat count
+    already trust.
+
+    Returns `{roster_row: guid}` for every row it could identify. Rows it
+    could not are simply absent, which is the honest answer and lets the
+    caller seat whoever it did find.
+
+    Costs one drag out and one back per row, so it is run ONCE per town
+    visit and the result is handed to the seating.
+    """
+    from bridge import townlayout as TL                # noqa: PLC0415
+
+    found: dict = {}
+    if not act:
+        say("  [town] WOULD learn which hero is on which roster row")
+        return found
+    rows = range(ROSTER_ROWS_VISIBLE) if rows is None else rows
+    park = TL.roster_portrait(_park_row(_Snapshot(profile)))
+    for row in rows:
+        src_pt = resolved.at(TL.roster_portrait(row))
+        dst_pt = resolved.at(TL.party_portrait(0))
+        if src_pt is None or dst_pt is None:
+            continue
+        before = _in_party(profile)
+        if party_slot_filled(win, resolved, 0):
+            continue                      # rank 1 is busy; nothing to learn
+        backend.drag(src_pt, dst_pt)
+        time.sleep(ROSTER_SCROLL_SETTLE)
+        after = _in_party(profile)
+        gained = after - before
+        if len(gained) == 1:
+            guid = next(iter(gained))
+            found[row] = guid
+            say(f"  [town] roster row {row} is guid {guid}")
+        # Put them back, whoever they were, so the next row starts clean.
+        backend.drag(dst_pt, resolved.at(park) if park else src_pt)
+        time.sleep(ROSTER_SCROLL_SETTLE)
+    return found
+
+
+# The roster list's SORT buttons, above it on the Hamlet and the estate map
+# alike (client fractions, measured live 2026-09-23 at 1280x720 by their own
+# tooltips): Level, Stress, Class, Activity. A second click on the same button
+# flips the order, and the order is NOT in the save -- so which way it runs
+# is read back off the list. A hero seated in the party stays pinned at the top.
+ROSTER_SORT = {"level": (1143 / 1280, 64 / 720), "stress": (1168 / 1280, 64 / 720),
+               "class": (1194 / 1280, 64 / 720), "activity": (1219 / 1280, 64 / 720)}
+
+
+def predicted_order(profile, by_stress: int = 0) -> list:
+    """The roster list PREDICTED from the save.
+
+    **The game SAVES the roster in the order it is DISPLAYED.** Measured
+    2026-09-23 and 2026-09-24: the learned rows were the living heroes in
+    `persist.roster.json` file order (the dead, `roster.status` 3, stay in the
+    file and are not drawn), whatever sort button was active when the file
+    was written. First under an all-ties stress sort, then under a
+    most-stressed-first one, where the FILE itself had been rewritten
+    most-stressed first. So with no click since the last save, the list IS
+    the file order (`by_stress=0`). A sort click re-orders the display at once
+    and the file only at the next save, so after one the list is a STABLE sort
+    of the file order: `by_stress=+1` least stressed first, `-1` most.
+    """
+    heroes = list(_Snapshot(profile).heroes)
+    if by_stress:
+        heroes = sorted(heroes, key=lambda h: by_stress * float(h.stress))
+    return [h.guid for h in heroes]
+
+
+def positions_from_order(order) -> dict:
+    """`{guid: (scroll_clicks, row)}` for a list in this order, the shape
+    `learn_roster_positions` returns: rows 0-7 on page 0, then one click per
+    further hero, each revealed at row 7."""
+    last = ROSTER_ROWS_VISIBLE - 1
+    return {g: (0, i) if i <= last else (i - last, last)
+            for i, g in enumerate(order)}
+
+
+def sort_roster_low_stress_first(win, backend, resolved, profile, *,
+                                 say=print, act: bool = False) -> dict:
+    """Every hero's `{guid: (scroll_clicks, row)}` from the SAVE, checked on
+    two rows; `{}` to fall back to the full walk.
+
+    Fran, 2026-09-23: avoid *"pushing into comp for every member of the
+    roster"*. The list is the save's order (see `predicted_order`), so the
+    first try clicks nothing at all: predict the file order, probe the first
+    and last rows of page 0. If that misses, click the Stress button and try
+    both stable sorts of the file order, since the direction a click lands on
+    is not in the save. Anything else falls back to the walk. Every seat is
+    still checked against the save by identity.
+    """
+    if not act:
+        say("  [town] WOULD predict the roster order from the save")
+        return {}
+    base = predicted_order(profile)
+    if not base:
+        return {}
+    probe_rows = sorted({0, min(ROSTER_ROWS_VISIBLE, len(base)) - 1})
+
+    def matches(order) -> Optional[dict]:
+        top = force_roster_to_top(win, backend, resolved, _Snapshot(profile),
+                                  say=lambda _s: None, act=act)
+        if not top.confirmed:
+            return None
+        seen = learn_roster_rows(win, backend, resolved, profile,
+                                 rows=probe_rows, say=lambda _s: None, act=act)
+        return seen if seen and all(seen.get(r) == order[r]
+                                    for r in probe_rows) else {}
+
+    first = matches(base)
+    if first is None:
+        return {}
+    if first:
+        say(f"  [town] roster order read from the save and confirmed on rows "
+            f"{probe_rows} - no sort, no walk")
+        return positions_from_order(base)
+    for _attempt in range(2):
+        backend.click(resolved.at(ROSTER_SORT["stress"]))
+        time.sleep(ROSTER_SCROLL_SETTLE)
+        low, high = predicted_order(profile, +1), predicted_order(profile, -1)
+        got = matches(low)
+        if got is None:
+            return {}
+        if got:
+            say(f"  [town] roster sorted least stressed first, predicted from "
+                f"the save and confirmed on rows {probe_rows}")
+            return positions_from_order(low)
+        if matches(high):
+            say("  [town] the stress sort came up most-stressed first - flipping")
+            continue
+    say("  [town] the list does not match any order predicted from the save - "
+        "walking it instead")
+    return {}
+
+
+def learn_roster_positions(win, backend, resolved, profile, *, say=print,
+                           act: bool = False) -> dict:
+    """`{guid: (scroll_clicks, row)}` for the WHOLE roster, not one page.
+
+    `learn_roster_rows` only sees the eight rows the list draws, and a roster
+    of 18 hides ten. Measured 2026-09-23: every planned hero outside the first
+    page fell back to scroll-and-guess, all four seats were dragged from row 7,
+    and the bar took 3 of 4.
+
+    One scroll click moves the list one row, so after `k` clicks down from the
+    top the hero newly revealed at the bottom row is list position `7 + k`.
+    Page 0 is learned whole; every further click reveals exactly one new hero
+    at row 7, which is probed the same way -- drag to the bar, ask the save who
+    arrived, put them back. A swallowed click shows up as a guid already known,
+    and is retried rather than trusted.
+    """
+    from bridge import act as act_mod                  # noqa: PLC0415
+
+    found: dict = {}
+    if not act:
+        say("  [town] WOULD learn every roster row")
+        return found
+    got = force_roster_to_top(win, backend, resolved, _Snapshot(profile),
+                              say=say, act=act)
+    if not got.confirmed:
+        return found
+    for row, guid in learn_roster_rows(win, backend, resolved, profile,
+                                       say=say, act=act).items():
+        found[guid] = (0, row)
+    total = len(_Snapshot(profile).heroes)
+    down = act_mod.plan_scroll_roster(True, resolved)
+    clicks = 0
+    misses = 0
+    # **Whether the list MOVED is the strip's question, not the probe's.**
+    # Measured 2026-09-23: a busy hero (in a building) at row 7 cannot be
+    # dragged, so the probe learns nothing -- and the old loop counted that
+    # as a swallowed click. The list HAD moved, so every later position was
+    # one short, and three busy heroes in a row ended the pass with an
+    # occultist and an antiquarian never learned. Seats then fell back to
+    # guessing and two went to the same row.
+    while (len(found) < total and clicks < total + 2 and misses < 3
+           and down.actionable):
+        before = _roster_strip(win, resolved)
+        _send(backend, down, act=True, say=lambda _s: None)
+        time.sleep(ROSTER_SCROLL_SETTLE)
+        after = _roster_strip(win, resolved)
+        if before is not None and after is not None                 and not _bar_moved(before, after):
+            misses += 1                  # the list did not move: at the end,
+            continue                     # or a swallowed click
+        misses = 0
+        clicks += 1
+        page = learn_roster_rows(win, backend, resolved, profile,
+                                 rows=[ROSTER_ROWS_VISIBLE - 1],
+                                 say=lambda _s: None, act=act)
+        guid = page.get(ROSTER_ROWS_VISIBLE - 1)
+        if guid is None or guid in found:
+            continue                     # a hero that cannot be dragged
+        found[guid] = (clicks, ROSTER_ROWS_VISIBLE - 1)
+        say(f"  [town] list position {ROSTER_ROWS_VISIBLE - 1 + clicks} "
+            f"is guid {guid}")
+    return found
+
+
+def _in_party(profile) -> set:
+    """Guids the save currently marks as seated."""
+    try:
+        from bridge.town_state import read_town_state   # noqa: PLC0415
+
+        return {h.guid for h in read_town_state(profile).heroes
+                if getattr(h, "in_party", False)}
+    except Exception:                                   # noqa: BLE001
+        return set()
+
+
+class _Snapshot:
+    """Just enough of a TownState for `_park_row`, without a second read."""
+
+    def __init__(self, profile):
+        try:
+            from bridge.town_state import read_town_state  # noqa: PLC0415
+
+            self.heroes = read_town_state(profile).heroes
+        except Exception:                                  # noqa: BLE001
+            self.heroes = []
+
+
+# The hero tab's DISMISS icon and close X, as client fractions. Measured live
+# 2026-09-23 at 1280x720, on the Hamlet and the estate map alike: a RIGHT-click
+# on a roster row opens the tab (a left click only starts a drag), the icons
+# down its top-left edge are Rename (y 110), Dismiss (y 133) and Switch Outfit
+# (y 157), and Dismiss raises "This will dismiss the hero permanently" with
+# Yes on `MODAL_OK`. The save drops the guid within a second.
+HERO_TAB_DISMISS = (119 / 1280, 133 / 720)
+HERO_TAB_CLOSE = (1003 / 1280, 110 / 720)
+DISMISS_WITNESS_S = 5.0
+
+
+def dismiss_heroes(win, backend, resolved, profile, guids, *, say=print,
+                   act: bool = False) -> list:
+    """Dismiss each hero in `guids` that the first page of the list shows.
+
+    **Irreversible, so it never acts on a guess.** Each row is identified by
+    `learn_roster_rows`, the drag probe the save witnesses, immediately
+    before its tab is opened. The page is re-learned after every dismissal,
+    because the list closes up. A hero not on the first page is left alone:
+    sort the list by stress first (the button above it; the order is not
+    saved) so the stressed heroes Fran's rule targets are on that page.
+    Only the estate map can probe, since the Hamlet has no party bar to drag
+    onto.
+    """
+    from bridge import act as act_mod                  # noqa: PLC0415
+    from bridge import townlayout as TL                # noqa: PLC0415
+    from bridge.actuation.plan import InputPlan, Step  # noqa: PLC0415
+
+    wanted = [int(g) for g in guids]
+    done: list = []
+    if not wanted:
+        return done
+    if not act:
+        say(f"  [town] WOULD dismiss {len(wanted)} hero(es): {wanted}")
+        return done
+    actuator = act_mod.Actuator(backend=backend, enabled=True,
+                                kill=act_mod.KillSwitch())
+    while wanted:
+        page = learn_roster_rows(win, backend, resolved, profile,
+                                 say=lambda _s: None, act=act)
+        hits = [(row, g) for row, g in sorted(page.items()) if g in wanted]
+        if not hits:
+            say(f"  [town] {len(wanted)} hero(es) to dismiss are not on the "
+                f"first page - leaving them")
+            break
+        row, guid = hits[0]
+        label = f"dismiss guid {guid} (row {row})"
+        pt = resolved.at(TL.roster_portrait(row))
+        before = {h.guid for h in _Snapshot(profile).heroes}
+        if pt is None or guid not in before:
+            done.append(Did(label, why="row point unknown or hero already gone"))
+            wanted.remove(guid)
+            continue
+        actuator.execute(InputPlan(
+            (Step("rclick", screen=pt, label=f"open row {row}'s tab"),),
+            "town", "open the hero tab"))
+        time.sleep(1.2)
+        backend.click(resolved.at(HERO_TAB_DISMISS))
+        time.sleep(1.0)
+        backend.click(resolved.modal_ok)
+        gone = False
+        deadline = time.time() + DISMISS_WITNESS_S
+        while time.time() < deadline:
+            time.sleep(0.5)
+            now = {h.guid for h in _Snapshot(profile).heroes}
+            if now != before:
+                gone = now == before - {guid}
+                break
+        if not gone:
+            # Whatever happened, stop: an irreversible step that did not do
+            # exactly what was asked is not repeated.
+            backend.click(resolved.at(HERO_TAB_CLOSE))
+            done.append(Did(label, sent=True, confirmed=False,
+                            why="the save did not drop exactly this hero"))
+            break
+        say(f"  [town] dismissed guid {guid} - confirmed by the save")
+        done.append(Did(label, sent=True, confirmed=True))
+        wanted.remove(guid)
+        time.sleep(0.8)
+    return done
+
+#: At most this many dismissals per town visit. The cap's first pass on a
+#: 102-hero roster is 12; bounding it keeps one visit from turning into an
+#: hour if something is slow, and the rest go next week.
+MAX_DISMISSALS_PER_VISIT = 12
+
+
+#: The Abbey's activity slots, measured off `captures/screens/abbey_panel.png`
+#: (1280x720, 2026-09-26): three rows -- Cloister (meditation), Transept
+#: (prayer), Penance Hall (flagellation) -- of three slots. An unlocked empty
+#: slot is a dark square, a locked one a brick arch, and a drop onto either an
+#: occupied or a locked slot does nothing, which the save shows.
+ABBEY_ROWS = {"meditation": 210.0 / 720, "prayer": 360.0 / 720,
+              "flagellation": 513.0 / 720}
+ABBEY_SLOT_X = (765.0 / 1280, 855.0 / 1280, 945.0 / 1280)
+#: The confirm (check mark) drawn under a filled slot; the treatment is only
+#: bought when it is clicked (measured live 2026-09-26: gold 14,315 -> 13,315
+#: on the click, and nothing without it).
+ABBEY_CONFIRM_DY = 58.0 / 720
+TREAT_WITNESS_S = 4.0
+#: Confirm clicks per placed hero before the treatment is reported missed.
+TREAT_CONFIRM_TRIES = 2
+
+
+def treat_heroes(win, backend, resolved, profile, treatments, *, say=print,
+                 act: bool = False) -> list:
+    """Put each planned hero into their stress activity.
+
+    `townplan.choose_treatments` has decided these every visit since it was
+    written, and nothing executed them: live 2026-09-26 the same Duelist at 99
+    stress was planned into the Cloister on every town visit of a night. Only
+    the Abbey is measured; other buildings are reported, not sent. The drag
+    is from the hero's roster row (found with the witnessed scroll) onto the
+    activity's slots left to right, and a slot counts only when the SAVE puts
+    that hero in the building.
+    """
+    from bridge import act as act_mod                  # noqa: PLC0415
+    from bridge import townlayout as TL                # noqa: PLC0415
+    from bridge.town_state import read_town_state      # noqa: PLC0415
+
+    done: list = []
+    abbey = [t for t in treatments if t.building == "abbey"
+             and t.activity in ABBEY_ROWS and t.guid]
+    for t in treatments:
+        if t not in abbey:
+            done.append(Did(f"treat {t.hero_class} in the {t.building}",
+                            why="that building's slots are not measured"))
+    if not abbey:
+        return done
+    if not act:
+        say(f"  [town] WOULD treat {len(abbey)} hero(es) in the Abbey")
+        return done
+    if not _on_town_screen(win):
+        _send(backend, act_mod.plan_close_building(resolved), act=act, say=say)
+        time.sleep(PANEL_OPEN_SETTLE)
+    _send(backend, act_mod.plan_open_building("abbey", resolved), act=act, say=say)
+    time.sleep(PANEL_OPEN_SETTLE)
+    if not _panel_is_open(win):
+        note = _bank_panel_frame(win)
+        if not _on_town_screen(win):
+            _send(backend, act_mod.plan_close_building(resolved), act=act, say=say)
+        return done + [Did("open the abbey", sent=True, confirmed=False,
+                           why=f"could not confirm the panel opened{note}")]
+    cursor: dict = {}
+    for t in abbey:
+        label = f"treat {t.hero_class} ({t.activity})"
+        try:
+            town_now = read_town_state(profile)
+        except Exception as exc:                       # noqa: BLE001
+            done.append(Did(label, why=f"could not read the roster ({exc})"))
+            break
+        rows = [i for i, h in enumerate(town_now.heroes) if h.guid == t.guid]
+        if not rows:
+            done.append(Did(label, why="not on the roster any more"))
+            continue
+        screen_row, why = _roster_row_for(win, backend, resolved, town_now,
+                                          rows[0], act=act, cursor=cursor)
+        if screen_row is None:
+            done.append(Did(label, why=why))
+            continue
+        src = resolved.at(TL.roster_portrait(screen_row))
+        placed = False
+        # Only the UNLOCKED slots (`Treatment.slots`, from the ranks owned),
+        # and the purchase is the confirm under the slot, witnessed by the
+        # wallet: the save does not put the hero in the building until the
+        # panel closes.
+        for x in ABBEY_SLOT_X[:max(1, int(getattr(t, "slots", 1) or 1))]:
+            row_y = ABBEY_ROWS[t.activity]
+            before = _wallet(profile).get("gold")
+            backend.drag(src, resolved.at((x, row_y)))
+            time.sleep(0.8)
+            # Two confirms, each witnessed by the wallet. Live 2026-09-27 the
+            # first treatment of a visit (a Leper, meditation) sat in its slot
+            # uncharged while the same geometry confirmed a prayer seconds
+            # later; a second click on the check mark costs nothing when the
+            # first already took (the slot is then occupied and the mark gone).
+            for _confirm in range(TREAT_CONFIRM_TRIES):
+                backend.click(resolved.at((x, row_y + ABBEY_CONFIRM_DY)))
+                deadline = time.time() + TREAT_WITNESS_S
+                while time.time() < deadline:
+                    time.sleep(0.5)
+                    now = _wallet(profile).get("gold")
+                    if before is not None and now is not None and now < before:
+                        placed = True
+                        break
+                if placed:
+                    break
+            if placed:
+                break
+            cursor.clear()          # the drag may have moved the list
+            screen_row, why = _roster_row_for(win, backend, resolved,
+                                              read_town_state(profile),
+                                              rows[0], act=act, cursor=cursor)
+            if screen_row is None:
+                break
+            src = resolved.at(TL.roster_portrait(screen_row))
+        done.append(Did(label, sent=True, confirmed=placed,
+                        why="" if placed else "no slot in that row took the hero"
+                                              + _bank_panel_frame(win)))
+    _send(backend, act_mod.plan_close_building(resolved), act=act, say=say)
+    time.sleep(PANEL_OPEN_SETTLE)
+    return done
+
+
+def dismiss_surplus(win, backend, resolved, profile, heroes, *, say=print,
+                    act: bool = False) -> list:
+    """Dismiss the heroes `townplan` named, reaching any row of the list.
+
+    Fran, 2026-09-26: per-class caps by level BAND (`hero_roles.band_caps`),
+    fodder only. Unlike `dismiss_heroes` this is not limited to the first page:
+    `_roster_row_for` rewinds and scrolls with every burst witnessed off the
+    strip (verified live: save row 40 opened save row 40's sheet). Each
+    dismissal is right-click -> Dismiss -> Yes, and the SAVE must then drop
+    exactly that guid -- anything else stops the pass, since the step cannot
+    be undone. The save is re-read before each one because the list closes up.
+    """
+    from bridge import townlayout as TL                # noqa: PLC0415
+    from bridge.town_state import read_town_state      # noqa: PLC0415
+
+    done: list = []
+    wanted = list(heroes)[:MAX_DISMISSALS_PER_VISIT]
+    if not wanted:
+        return done
+    if not act:
+        say(f"  [town] WOULD dismiss {len(wanted)}: "
+            + ", ".join(h.label() for h in wanted))
+        return done
+    for hero in wanted:
+        label = f"dismiss {hero.label()}"
+        try:
+            town_now = read_town_state(profile)
+        except Exception as exc:                       # noqa: BLE001
+            done.append(Did(label, why=f"could not read the roster ({exc})"))
+            break
+        rows = [i for i, h in enumerate(town_now.heroes) if h.guid == hero.guid]
+        if not rows:
+            done.append(Did(label, why="not on the roster any more"))
+            continue
+        screen_row, why = _roster_row_for(win, backend, resolved, town_now,
+                                          rows[0], act=act, cursor=None)
+        if screen_row is None:
+            done.append(Did(label, why=why))
+            break
+        before = {h.guid for h in town_now.heroes}
+        backend.right_click(resolved.at(TL.roster_portrait(screen_row)))
+        time.sleep(1.2)
+        backend.click(resolved.at(HERO_TAB_DISMISS))
+        time.sleep(1.0)
+        backend.click(resolved.modal_ok)
+        gone = False
+        deadline = time.time() + DISMISS_WITNESS_S
+        while time.time() < deadline:
+            time.sleep(0.5)
+            now = {h.guid for h in _Snapshot(profile).heroes}
+            if now != before:
+                gone = now == before - {hero.guid}
+                break
+        if not gone:
+            backend.click(resolved.at(HERO_TAB_CLOSE))
+            done.append(Did(label, sent=True, confirmed=False,
+                            why="the save did not drop exactly this hero - "
+                                "stopping"))
+            break
+        say(f"  [town] dismissed {hero.label()} - confirmed by the save")
+        done.append(Did(label, sent=True, confirmed=True))
+        time.sleep(0.6)
     return done
 
 
@@ -1589,6 +2538,43 @@ def seat_hero(win, backend, resolved, roster_row: int, rank: int = 1, *,
                confirmed=moved, why="" if moved else "the bar did not change")
 
 
+def _look_frame(win):
+    """A grab for comparing one screen against itself a moment later."""
+    try:
+        import numpy as np                             # noqa: PLC0415
+        from bridge import screen as screen_mod        # noqa: PLC0415
+
+        img = screen_mod.grab(win)
+        return None if img is None else np.asarray(img, dtype=float)
+    except Exception:                                  # noqa: BLE001
+        return None
+
+
+#: How much of the frame has to differ before a click counts as having landed.
+#
+# The estate map animates, so "identical" is too strict. Measured on it
+# 2026-09-22, mean absolute difference over the whole frame:
+#
+#     idle, no click at all      0.023
+#     a click on empty map       0.042
+#     a click on a quest emblem  1.247   (the left panel redraws)
+#
+# 0.6 is fourteen times the noise and half the signal, which is as wide a gap
+# as this file has for any threshold.
+FRAME_SAME = 0.6
+
+
+def _frames_match(before, after) -> bool:
+    try:
+        import numpy as np                             # noqa: PLC0415
+
+        if before.shape != after.shape:
+            return False
+        return float(np.abs(before - after).mean()) < FRAME_SAME
+    except Exception:                                  # noqa: BLE001
+        return False
+
+
 def pick_quest(win, backend, resolved, region: str = WEEK_SKIP_REGION, *,
                quest=None, say=print, act: bool = False) -> list:
     """Select a quest on the estate map.
@@ -1617,10 +2603,37 @@ def pick_quest(win, backend, resolved, region: str = WEEK_SKIP_REGION, *,
                                    f"see QUEST_ROW_MEASURED)")]
         at = resolved.at(pt)
         say(f"  [town] {label} at {at}")
-        if act and at is not None:
-            backend.click(at)
-            time.sleep(STEP_SETTLE)
-        return [Did(label, sent=act, confirmed=act)]
+        if not act or at is None:
+            return [Did(label, sent=act, confirmed=act)]
+        # **A QUEST CLICK THAT HITS NOTHING LEAVES THE LAST ONE SELECTED**, and
+        # that is how a Resolve-0 party was sent into the endless Farmstead.
+        # Measured 2026-09-22 on Fran's campaign: the plan chose `warrens
+        # cleanse`, the derived token resolved to (583, 359), and the raid
+        # that started was `farm wave` -- the quest selected on a previous
+        # iteration. The save carries no "selected" marker to check against,
+        # so the evidence is the SCREEN: picking a different quest always
+        # redraws the left-hand panel, which names it and lists its goals and
+        # rewards.
+        #
+        # This install is why it misses at all. `More Available Quests` puts
+        # TEN quests on the map where vanilla draws three to five -- four of
+        # them in the Ruins alone -- and `quest_point` derives one token per
+        # DUNGEON from shipped geometry, which cannot address the second quest
+        # in a region and lands off the emblem when the row grows.
+        #
+        # Refusing is much cheaper than the alternative: the list holds
+        # `darkestdungeon` at difficulty 6 and the Farmstead, so a missed
+        # click can embark a level-0 party on content that ends a campaign.
+        before = _look_frame(win)
+        backend.click(at)
+        time.sleep(STEP_SETTLE)
+        after = _look_frame(win)
+        if before is not None and after is not None and _frames_match(before, after):
+            return [Did(label, sent=True, confirmed=False,
+                        why="the estate map did not change, so the click hit "
+                            "no emblem and whatever was selected before is "
+                            "still selected - refusing to embark blind")]
+        return [Did(label, sent=True, confirmed=True)]
 
     done = []
     for which in ("banner", "emblem"):
@@ -1802,7 +2815,8 @@ def week_skip(win, backend, profile, *, hero_class: str = "vestal",
 
 def embark_setup(win, backend, profile, *, store=None, plan=None, say=print,
                  act: bool = False, seed: Optional[int] = None,
-                 embark: bool = True, min_party: Optional[int] = None) -> list:
+                 embark: bool = True, min_party: Optional[int] = None,
+                 veto=None) -> list:
     """Quest, comp, formation, guild, provisions -- in Fran's order.
 
     Starts in the Hamlet and ends in a raid. Returns a list of `Did` and never
@@ -1821,20 +2835,37 @@ def embark_setup(win, backend, profile, *, store=None, plan=None, say=print,
     resolved = fractional.resolve(win)
 
     here = _look(win)
+    if here not in TOWN_SCREENS and act:
+        # **Walk back before refusing.** Live 2026-09-28, twice: a town visit
+        # ended on a screen the recogniser could not name (a panel left up, or
+        # the Butcher's Circus behind the coach's scene point) and the embark
+        # refused, throwing the whole iteration away. The frame is banked for
+        # the record, then the same walk that leaves the results pages brings
+        # the Hamlet back.
+        note = _bank_panel_frame(win)
+        say(f"  [town] embark: not in the Hamlet (screen: "
+            f"{here or 'UNKNOWN'}){note} - walking back")
+        walk(win, backend, until=lambda s: s in TOWN_SCREENS, say=say,
+             act=act, buy=False)
+        here = _look(win)
+        # `walk` waits out a screen it cannot name and never clicks on it; an
+        # unbanked panel is exactly that. Every building panel closes by the
+        # same X, and nothing here is the bare Hamlet, so it is tried.
+        for _try in range(2):
+            if here in TOWN_SCREENS:
+                break
+            pt = resolved.town_close_panel
+            if pt is None:
+                break
+            backend.click(pt)
+            time.sleep(PANEL_OPEN_SETTLE)
+            here = _look(win)
     if here not in TOWN_SCREENS:
         return [Did("embark setup",
                     why=f"not in the Hamlet (screen: {here or 'UNKNOWN'})")]
 
-    # 1. Hamlet -> the estate map, which is where the quest map, the party bar
-    #    and the roster list are all drawn.
-    got = walk(win, backend, until=lambda s: s == "estate_map", say=say,
-               act=act, buy=False)
-    done.append(Did("reach the estate map", sent=act, confirmed=got.ok,
-                    why="" if got.ok else got.why or got.stopped_on))
-    if not got.ok:
-        return done
-
-    # 2. Scout. The quests are in `persist.quest.json`, so this is a save read
+    # 2. Scout -- FIRST since 2026-09-24: the plan is a save read, and the
+    #    Guild visit it drives has to happen in the Hamlet (below). The quests are in `persist.quest.json`, so this is a save read
     #    and nothing is clicked for it.
     if plan is None:
         if store is None:
@@ -1848,7 +2879,7 @@ def embark_setup(win, backend, profile, *, store=None, plan=None, say=print,
             return done + [Did("scout the quests",
                                why=f"{type(exc).__name__}: {exc}")]
         plan = embarkplan.plan_embark(town, store, profile,
-                                      random.Random(seed))
+                                      random.Random(seed), veto=veto)
     if plan is None:
         return done + [Did("scout the quests",
                            why="no simulable quest on the map")]
@@ -1856,6 +2887,30 @@ def embark_setup(win, backend, profile, *, store=None, plan=None, say=print,
         say(f"  [town] {line}")
     done.append(Did(f"scout: {plan.quest.label()} with {plan.comp}",
                     sent=False, confirmed=True, why="read from the save"))
+
+    # 4-6 (moved). **The Guild is visited from the HAMLET.** It used to run
+    # after seating, with the estate map still open -- where no building can
+    # be clicked -- so every planned skill unlock failed as "could not confirm
+    # the panel opened" (live 2026-09-24).
+    done += _visit_guild(win, backend, resolved, profile, plan, say=say, act=act)
+    # The comp's four skills on each seated hero (Fran, 2026-09-26), after
+    # the Guild has bought what was missing.
+    done += select_loadouts(win, backend, resolved, profile, plan, say=say, act=act)
+    # Trinkets next, still in the Hamlet: the chest is on its bottom bar.
+    done += equip_trinkets(win, backend, resolved, profile, plan,
+                           say=say, act=act)
+    if act and _look(win) not in TOWN_SCREENS:
+        from bridge import act as act_mod            # noqa: PLC0415
+        _send(backend, act_mod.plan_close_building(resolved), act=act, say=say)
+
+    # 1. Hamlet -> the estate map, which is where the quest map, the party bar
+    #    and the roster list are all drawn.
+    got = walk(win, backend, until=lambda s: s == "estate_map", say=say,
+               act=act, buy=False)
+    done.append(Did("reach the estate map", sent=act, confirmed=got.ok,
+                    why="" if got.ok else got.why or got.stopped_on))
+    if not got.ok:
+        return done
 
     # **FOUR HEROES OR NOBODY GOES.** Fran: *"we should make sure we are
     # sending 4 people comps during embark"*.
@@ -1918,7 +2973,42 @@ def embark_setup(win, backend, profile, *, store=None, plan=None, say=print,
                            why=f"the plan seats two heroes in one rank "
                                f"({sorted(ranks)}) - refusing before any drag")]
 
-    index_of = {h.guid: i for i, h in enumerate(town.heroes)}
+    # **THE DRAWN LIST, NOT THE SAVE.** See `drawn_roster`: a hero in the
+    # party bar is not in the list, so a save index is not a list index and
+    # converting one through the offset seats somebody else.
+    # **RE-READ AFTER THE CLEAR, because clearing changes what is DRAWN.**
+    # `town` was read before `clear_party`, when the heroes about to be seated
+    # were still standing in the party bar -- and a hero in the bar is not in
+    # the list (see `drawn_roster`). Indexing that snapshot dropped exactly
+    # the heroes this loop is here to seat, which reported as "that hero is
+    # not in the roster any more" for three of four (measured 2026-09-22).
+    #
+    # The save is the honest source: `clear_party` confirms each slot against
+    # it, so by here it has been written. If the re-read fails, the stale
+    # snapshot is still better than nothing and the seats that can be found
+    # are still sent.
+    try:
+        town = read_town_state(profile)
+    except Exception:                                # noqa: BLE001
+        pass
+    # **THE CLEAR IS THE TRUTH, NOT THE FILE.** `persist.roster.json` is
+    # written late -- this repo's oldest live lesson -- so right after
+    # `clear_party` its `in_party` flags still describe the bar as it WAS.
+    # Trusting them dropped a hero from the drawn list who was no longer on
+    # the bar, so nothing dragged him and the count came home 3 of 4 twice
+    # over (measured 2026-09-22, highwayman#2 both times).
+    #
+    # `clear_party` has just emptied every slot it could, so the list draws
+    # everybody again. That is what the seats are computed against.
+    try:
+        from dataclasses import replace as _replace   # noqa: PLC0415
+        town = _replace(town, heroes=[_replace(h, in_party=False)
+                                      for h in town.heroes])
+    except Exception:                                # noqa: BLE001
+        pass
+    index_of = {h.guid: i for i, h in enumerate(drawn_roster(town))}
+    already_seated = {h.guid for h in town.heroes
+                      if getattr(h, "in_party", False)}
     # **Seated in ROSTER order, not rank order.** Which rank a hero lands in
     # is decided by the slot the drag ENDS on, so the order of the drags is
     # free -- and taking them in list order means the list is walked once
@@ -1927,13 +3017,158 @@ def embark_setup(win, backend, profile, *, store=None, plan=None, say=print,
     # **THE SEATS ARE COLLECTED, NOT SLICED OFF THE TAIL.** See the count
     # below: a scroll appends to `done` too, so `done[-4:]` is not four seats.
     seats: list = []
-    for seat in sorted(plan.party, key=lambda s: index_of.get(s.hero.guid, 99)):
+    # **ASCENDING, AND THE LIST IS TRACKED AS IT SHRINKS -- which is what
+    # makes scrolling unnecessary.** DD moves a seated hero out of the roster
+    # list into the party bar, so every row below them shifts up by one and a
+    # once-computed index goes stale. That was the "3 of 4" which survived the
+    # offset fix: measured 2026-09-22, all four seats reported OK and two of
+    # them dragged the SAME hero, because a scroll at the list's bottom is a
+    # no-op and the row was therefore unchanged.
+    #
+    # Taken in ascending order with the seated hero POPPED, indices only ever
+    # decrease: the k-th seat sits at `index - k`. Four seats out of eleven
+    # therefore never exceed row 7 -- the worst case is index 10 as the fourth
+    # seat, 10 - 3 = 7 -- so the whole job fits inside the eight drawn rows
+    # and no scroll is needed at all. That matters because a scroll cannot be
+    # verified here: `_roster_offset` reads portrait art, and this install's
+    # art is replaced by a UI mod.
+    #
+    # The list is popped rather than re-read because the save is written late:
+    # asking the file after each drag would answer about the bar as it was.
+    # `_bring_into_view` is still the fallback for a roster big enough that
+    # the arithmetic above does not fit.
+    # **ASK THE GAME WHICH ROW HOLDS WHOM.** Every way of inferring it is
+    # broken here: the list order is not the save's, and the portrait matcher
+    # that used to recover it compares against art a UI mod replaces. See
+    # `learn_roster_rows` -- it drags each row onto the bar, reads the save to
+    # see whose `in_party` turned on, and puts them back. Measured 2026-09-22
+    # on Fran's roster, it recovered rows 1-7 in one pass and the answer was
+    # nothing like the save order.
+    # **Sort first, and the first page is usually enough.** Every planned
+    # hero on page 0 means no whole-list walk at all.
+    positions = sort_roster_low_stress_first(win, backend, resolved, profile,
+                                             say=say, act=act)
+    if not positions:
+        positions = learn_roster_positions(win, backend, resolved, profile,
+                                           say=say, act=act)
+    row_of = {guid: row for guid, (clicks, row) in positions.items()
+              if clicks == 0}
+    live_rows = [h.guid for h in drawn_roster(town)]
+    # The learning pass leaves the list scrolled DOWN, so a page-0 row is
+    # only right after the list is rewound; `at_top` says whether it is.
+    at_top = not positions
+    for seat in sorted(plan.party,
+                       key=lambda s: (positions.get(s.hero.guid, (0, 0))[0],
+                                      index_of.get(s.hero.guid, 99))):
         label = f"seat {seat.hero.label()} at rank {seat.rank}"
         index = index_of.get(seat.hero.guid)
+        if index is None and seat.hero.guid in already_seated:
+            # **ALREADY ON THE BAR IS NOT MISSING.** A hero standing in the
+            # party bar is not drawn in the roster list, so there is nothing
+            # to drag them from -- and `clear_party` does not always empty
+            # every slot ("the bar did not change" cannot tell an empty slot
+            # from a failed drag). Refusing here cost the embark outright:
+            # measured 2026-09-22, three of four seated and the fourth
+            # reported as "not in the roster any more" while it was sitting
+            # on the bar the whole time.
+            #
+            # The RANK may not be the one planned, which is the honest cost
+            # of this and is said out loud rather than hidden -- a party on
+            # the wrong ranks still raids, and a party of three does not go
+            # at all.
+            seats.append(Did(label, sent=False, confirmed=True,
+                             why="already on the party bar, so not dragged; "
+                                 "its rank is whatever the bar already had"))
+            done.append(seats[-1])
+            continue
         if index is None:
             seats.append(Did(label, why="that hero is not in the roster any more"))
             done.append(seats[-1])
             continue
+        # **A hero learned on a LATER page is reached by replaying the clicks
+        # that revealed them, and the seat is checked against the save** --
+        # the only witness that says WHO arrived rather than that something
+        # moved. See `learn_roster_positions`.
+        pos = positions.get(seat.hero.guid)
+        if pos is not None and pos[0] > 0:
+            label = f"seat {seat.hero.label()} at rank {seat.rank}"
+            top = force_roster_to_top(win, backend, resolved, town,
+                                      say=lambda _s: None, act=act)
+            scrolled = scroll_roster_by(win, backend, resolved, pos[0],
+                                        say=lambda _s: None, act=act)
+            if not (top.confirmed and scrolled.confirmed):
+                seats.append(Did(label, why="could not bring the page back"))
+                done.append(seats[-1])
+                continue
+            at_top = False
+            seat_hero(win, backend, resolved, pos[1], seat.rank,
+                      say=say, act=act)
+            time.sleep(ROSTER_SCROLL_SETTLE)
+            arrived = seat.hero.guid in _in_party(profile)
+            seats.append(Did(label, sent=True, confirmed=arrived,
+                             why="" if arrived else
+                             "a different hero arrived - the page drifted"))
+            done.append(seats[-1])
+            continue
+        # The LEARNED row wins; the positional guess is only a fallback for a
+        # hero the learning pass could not identify.
+        row = row_of.get(seat.hero.guid)
+        if row is None and positions:
+            # **The list was LEARNED and this hero is not in it: do not
+            # guess.** The positional guess sent two heroes to row 6 on
+            # 2026-09-23 and the second drag merely moved the first.
+            seats.append(Did(label, why="not found in the learned roster "
+                                        "list - not guessing a row"))
+            done.append(seats[-1])
+            continue
+        if row is None:
+            try:
+                row = live_rows.index(seat.hero.guid)
+            except ValueError:
+                row = None
+        if row is not None and row < ROSTER_ROWS_VISIBLE and not at_top:
+            force_roster_to_top(win, backend, resolved, town,
+                                say=lambda _s: None, act=act)
+            at_top = True
+        if row is not None and row < ROSTER_ROWS_VISIBLE:
+            # **A SEAT MUST MAKE THE BAR FULLER, and "the bar changed" does
+            # not.** The roster list re-flows with an ANIMATION when a hero
+            # leaves it, so a second drag aimed at the row the last hero
+            # vacated can still grab that same hero -- who then MOVES from
+            # one rank to another. The bar changes, the drag reports OK, and
+            # the party is one short. Measured 2026-09-22: rows 3, 3, 6, 7
+            # into ranks 3, 2, 4, 1, all four "OK", bar took 3 of 4.
+            before_n = sum(1 for i in range(PARTY_RANKS)
+                           if party_slot_filled(win, resolved, i))
+            got = seat_hero(win, backend, resolved, row, seat.rank,
+                            say=say, act=act)
+            time.sleep(ROSTER_SCROLL_SETTLE)      # let the list re-flow
+            after_n = sum(1 for i in range(PARTY_RANKS)
+                          if party_slot_filled(win, resolved, i))
+            if got.confirmed and act and after_n != before_n + 1:
+                got = Did(got.what, sent=True, confirmed=False,
+                          why=f"the bar went {before_n} -> {after_n}, so that "
+                              f"drag MOVED a hero already seated rather than "
+                              f"adding one - the list had not re-flowed yet")
+            elif got.confirmed and act and positions                     and seat.hero.guid not in _in_party(profile):
+                # **WHO arrived, not just that someone did.** With the order
+                # predicted rather than probed row by row, the save is the
+                # check that the row held the planned hero.
+                got = Did(got.what, sent=True, confirmed=False,
+                          why="a different hero arrived - the predicted row "
+                              "was wrong")
+            seats.append(got)
+            done.append(got)
+            # **NO POP: the estate-map list does NOT re-flow.** Measured
+            # 2026-09-22 -- a seated hero STAYS in the list at the same row
+            # and gains a red marker, and dragging that row again grabs the
+            # same hero and merely MOVES them between ranks, which is why the
+            # bar sat at 1 through three further drags. The 33.7 change in
+            # the row's patch after a seat was the marker appearing, not a
+            # different hero arriving.
+            continue
+        # Too far down for the drawn rows: fall back to scrolling, which is
+        # only reachable on a roster larger than the arithmetic above covers.
         offset, scrolled = _bring_into_view(win, backend, resolved, town, index,
                                             say=say, act=act)
         if scrolled is not None:
@@ -1948,9 +3183,12 @@ def embark_setup(win, backend, profile, *, store=None, plan=None, say=print,
                                         f"offset {offset}"))
             done.append(seats[-1])
             continue
-        seats.append(seat_hero(win, backend, resolved, index - offset,
-                               seat.rank, say=say, act=act))
-        done.append(seats[-1])
+        got = seat_hero(win, backend, resolved, index - offset, seat.rank,
+                        say=say, act=act)
+        seats.append(got)
+        done.append(got)
+        if got.confirmed and row is not None:
+            live_rows.pop(row)
 
     # **AND FOUR MUST ACTUALLY BE ON THE BAR.** The plan having four says the
     # roster can field them; it does not say the drags landed. A seat can be
@@ -1993,8 +3231,7 @@ def embark_setup(win, backend, profile, *, store=None, plan=None, say=print,
                            why=f"the party bar took {seated} of {want} heroes "
                                f"- not embarking short-handed")]
 
-    # 4-6. The Guild, and the Blacksmith after it.
-    done += _visit_guild(win, backend, resolved, profile, plan, say=say, act=act)
+    # 4-6. The Guild ran in the Hamlet, before the estate map (see above).
 
     # 7. Back to the raid, buying the basket on the way through.
     if not embark:
@@ -2039,13 +3276,12 @@ def _visit_guild(win, backend, resolved, profile, plan, *, say=print,
     done: list = []
     for hero, skill in unlocks:
         say(f"  [town] WOULD unlock {hero.hero_class}.{skill} (1000g)")
-    if TL.building_scene_point("guild") is None:
-        done.append(Did(f"unlock {len(unlocks)} skill(s)",
-                        why="the guild's scene point has never been measured; "
-                            "a building is entered by clicking it in the "
-                            "Hamlet and only the stage coach is measured"))
-        return done
-
+    # **THE MISSING SCENE POINT IS NO LONGER A REFUSAL.** It used to return
+    # here, which meant every skill the embark plan had already budgeted for
+    # was skipped and the party embarked carrying a comp it had not been
+    # given. `act.plan_open_building` now opens the stage coach -- the one
+    # measured scene point -- and hops along the navigation strip, which was
+    # verified live on 2026-09-21.
     opened = _send(backend, act_mod.plan_open_building("guild", resolved),
                    act=act, say=say)
     if opened:
@@ -2067,6 +3303,13 @@ def _visit_guild(win, backend, resolved, profile, plan, *, say=print,
         _send(backend, act_mod.plan_close_building(resolved), act=act, say=say)
         return done
 
+    # **THE TREE IS NOT DRAWN UNTIL A HERO IS IN THE SLOT.** The panel opens
+    # on "Drag a hero from the roster here", and every skill row -- and so
+    # every buy button -- appears only once one is dropped. Measured live
+    # 2026-09-21: the panel was open, the crest tree was up, and the seven
+    # skill rows did not exist until Dismas was dragged in.
+    in_slot = None
+    cursor: dict = {}
     for hero, skill in unlocks:
         before = _wallet(profile)
         row = _guild_row(hero.hero_class, skill)
@@ -2074,6 +3317,13 @@ def _visit_guild(win, backend, resolved, profile, plan, *, say=print,
             done.append(Did(f"unlock {hero.hero_class}.{skill}",
                             why="that skill is not in the class's tree"))
             continue
+        if in_slot != getattr(hero, "guid", id(hero)):
+            put = _put_hero_in_guild(win, backend, resolved, profile, hero,
+                                     say=say, act=act, cursor=cursor)
+            done.append(put)
+            if not put.confirmed:
+                continue
+            in_slot = getattr(hero, "guid", id(hero))
         sent = _send(backend, act_mod.plan_buy_skill(row, resolved),
                      act=act, say=say)
         after = _await(lambda: _wallet(profile), before) if sent else before
@@ -2081,6 +3331,555 @@ def _visit_guild(win, backend, resolved, profile, plan, *, say=print,
                         confirmed=sent and after != before,
                         why="" if after != before else "the wallet did not move"))
     _send(backend, act_mod.plan_close_building(resolved), act=act, say=say)
+    return done
+
+
+def _put_hero_in_guild(win, backend, resolved, profile, hero, *, say=print,
+                       act: bool = False,
+                       cursor: Optional[dict] = None) -> "Did":
+    """Drag one hero into the Guild panel's slot so their tree is drawn.
+
+    **The roster list is SCROLLED and the save does not say so**, which is
+    why this goes through `_roster_offset` rather than using the save index:
+    a wrong offset does not miss, it drags a DIFFERENT hero, and the panel
+    then happily draws that hero's tree for a purchase meant for someone
+    else. Refusing is the cheaper failure.
+    """
+    from bridge import townlayout as TL                # noqa: PLC0415
+    from bridge.town_state import read_town_state      # noqa: PLC0415
+
+    label = f"put {hero.hero_class} in the guild"
+    try:
+        town_now = read_town_state(profile)
+    except Exception as exc:                           # noqa: BLE001
+        return Did(label, why=f"could not read the roster ({exc})")
+    guid = getattr(hero, "guid", None)
+    save_row = next((i for i, h in enumerate(town_now.heroes)
+                     if getattr(h, "guid", None) == guid), None)
+    if save_row is None:
+        return Did(label, why="that hero is not on the roster any more")
+    # **The list IS the save's order** (`predicted_order`, measured live
+    # 2026-09-24), so the hero's place is `save_row` among the living, and
+    # the portrait matcher -- broken by Fran's UI mods -- is not needed. The
+    # list is rewound to the top and scrolled down to that place, the same
+    # way the seating reaches a later page.
+    if act:
+        screen_row, why = _roster_row_for(win, backend, resolved, town_now,
+                                          save_row, act=act, cursor=cursor)
+        if screen_row is None:
+            return Did(label, why=why)
+    else:
+        screen_row = min(save_row, ROSTER_ROWS_VISIBLE - 1)
+    src_pt = resolved.at(TL.roster_portrait(screen_row))
+    dst_pt = resolved.at(TL.GUILD_HERO_SLOT)
+    if src_pt is None or dst_pt is None:
+        return Did(label, why=f"no point for roster row {screen_row}")
+    say(f"  [town] drag {hero.hero_class} (save row {save_row}, screen row "
+        f"{screen_row}) into the guild")
+    if not act:
+        return Did(label, sent=False, confirmed=False, why="not armed")
+    sent = bool(backend.drag(src_pt, dst_pt))
+    time.sleep(PANEL_OPEN_SETTLE)
+    return Did(label, sent=sent, confirmed=sent)
+
+
+#: A hero's Equipment slot counts as CHANGED by a drag when its box differs
+#: from the frame before by more than this mean per-channel difference. An
+#: empty slot is a dark bag outline; a trinket is a full-colour card.
+TRINKET_SLOT_CHANGED = 12.0
+
+
+def _slot_box_diff(before, after, resolved, frac) -> Optional[float]:
+    """Mean absolute difference over one Equipment slot's box, or None."""
+    try:
+        import numpy as np                           # noqa: PLC0415
+        pt = resolved.at(frac)
+        cx, cy = resolved.win.client[0], resolved.win.client[1]
+        x, y = pt[0] - cx, pt[1] - cy
+        h, w = before.shape[:2]
+        dx, dy = max(8, int(22 * w / 1280)), max(16, int(44 * h / 720))
+        a = before[max(0, y - dy):y + dy, max(0, x - dx):x + dx].astype(int)
+        b = after[max(0, y - dy):y + dy, max(0, x - dx):x + dx].astype(int)
+        return float(np.abs(a - b).mean()) if a.size and a.shape == b.shape else None
+    except Exception:                                # noqa: BLE001
+        return None
+
+
+def _roster_row_for(win, backend, resolved, town_now, save_row: int, *,
+                    act: bool, cursor: Optional[dict] = None):
+    """Bring save row `save_row` into view; `(screen_row, "")` or
+    `(None, why)`. See `_open_sheet_with_chest` for what `cursor` saves."""
+    last = ROSTER_ROWS_VISIBLE - 1
+    known = cursor.get("offset") if cursor else None
+    if known is not None:
+        # BOTH frames, and unchanged: `_bar_moved` says False when it cannot
+        # see, and "cannot see" must send this back to the rewind.
+        was, now = cursor.get("strip"), _roster_strip(win, resolved)
+        if was is None or now is None or _bar_moved(was, now):
+            known = None
+    if known is not None and save_row >= known:
+        if save_row > known + last:
+            scrolled = scroll_roster_by(win, backend, resolved,
+                                        save_row - last - known,
+                                        say=lambda _s: None, act=act)
+            if not scrolled.confirmed:
+                return None, "could not scroll to the hero"
+            known = save_row - last
+        screen_row = save_row - known
+    else:
+        top = force_roster_to_top(win, backend, resolved, town_now,
+                                  say=lambda _s: None, act=act)
+        if not top.confirmed:
+            return None, "could not rewind the roster list"
+        known = 0
+        if save_row > last:
+            scrolled = scroll_roster_by(win, backend, resolved, save_row - last,
+                                        say=lambda _s: None, act=act)
+            if not scrolled.confirmed:
+                return None, "could not scroll to the hero"
+            known = save_row - last
+        screen_row = save_row - known
+    if cursor is not None:
+        cursor["offset"] = known
+        cursor["strip"] = _roster_strip(win, resolved)
+    return screen_row, ""
+
+
+def _open_sheet_with_chest(win, backend, resolved, town_now, guid, *,
+                           act: bool, cursor: Optional[dict] = None) -> str:
+    """Scroll to a hero, right-click their portrait, open the chest.
+
+    Returns "" on success, else why not. The sheet and the Trinket Inventory
+    then sit side by side, which is where every drag below happens.
+
+    **`cursor` saves the rewind.** A full rewind plus a counted scroll per
+    hero, at ~1.5 s a row on a 60-hero roster, made a town visit take twenty
+    minutes (live 2026-09-25). After one rewind the offset is KNOWN -- the
+    same counted trust `scroll_roster_by` already runs on -- so the next hero
+    further down only scrolls the difference. It is reused only while the
+    roster strip on screen still matches the one captured after the last
+    scroll; anything that moved the list sends it back to the rewind.
+    """
+    from bridge import townlayout as TL                # noqa: PLC0415
+    save_row = next((i for i, h in enumerate(town_now.heroes)
+                     if getattr(h, "guid", None) == guid), None)
+    if save_row is None:
+        return "not on the roster any more"
+    screen_row, why = _roster_row_for(win, backend, resolved, town_now,
+                                      save_row, act=act, cursor=cursor)
+    if screen_row is None:
+        return why
+    portrait = resolved.at(TL.roster_portrait(screen_row))
+    chest = resolved.at(TL.TRINKET_CHEST_BUTTON)
+    if portrait is None or chest is None:
+        return "no point for the portrait or the chest"
+    backend.right_click(portrait)
+    time.sleep(PANEL_OPEN_SETTLE)
+    backend.click(chest)
+    time.sleep(PANEL_OPEN_SETTLE)
+    return ""
+
+
+def _close_sheet_and_chest(backend, resolved) -> None:
+    """The inventory's X, then the sheet's. The game saves on the close."""
+    from bridge import townlayout as TL                # noqa: PLC0415
+    for frac in (TL.TRINKET_PANEL_CLOSE, TL.HERO_SHEET_CLOSE):
+        pt = resolved.at(frac)
+        if pt is not None:
+            backend.click(pt)
+            time.sleep(PANEL_OPEN_SETTLE)
+
+
+#: Classes with no 4-of-7 choice (`env/expedition_env.UNRESTRICTED_HEROES`,
+#: restated here so the bridge does not import the training env).
+UNRESTRICTED_LOADOUT = frozenset({"abomination", "duelist"})
+
+
+def loadout_toggles(order, selected, unlocked, want, size: int = 4):
+    """Which sheet icons to click to wear `want`: `(off, on, target)`.
+
+    `order` is the class's skill order (the sheet's), `selected` what the
+    hero wears now, `unlocked` what they own. The target is the wanted skills
+    they own, topped up to `size` with what they already wear, so a hero
+    missing a comp skill keeps a full bar. Deselections go first: a fifth
+    selection is refused by the game."""
+    own = set(unlocked)
+    target = [s for s in want if s in own][:size]
+    for s in selected:
+        if len(target) >= size:
+            break
+        if s not in target and s in own:
+            target.append(s)
+    off = [order.index(s) for s in selected if s not in target and s in order]
+    on = [order.index(s) for s in target if s not in selected and s in order]
+    return off, on, target
+
+
+def select_loadouts(win, backend, resolved, profile, plan, *, say=print,
+                    act: bool = False) -> list:
+    """Make each seated hero wear the comp's four skills before embarking.
+
+    Fran, 2026-09-26: *"choose their optimal loadout skills for the comp and
+    make them use it before embarking"*. Until now the party left with
+    whatever was last selected. Right-click the roster portrait for the
+    sheet, click the icons `loadout_toggles` names, close; the SAVE is the
+    witness (it takes the selection on the close)."""
+    from bridge import townlayout as TL                # noqa: PLC0415
+    from bridge.town_state import read_town_state      # noqa: PLC0415
+    from data.hero_skills import unlocked              # noqa: PLC0415
+    from data.town_costs import load_hero_costs        # noqa: PLC0415
+    from bridge.townplan import GAME_DIR               # noqa: PLC0415
+
+    done: list = []
+    seats = [s for s in (getattr(plan, "party", ()) or ()) if s.skills]
+    if not seats:
+        return done
+    try:
+        town_now = read_town_state(profile)
+    except Exception as exc:                           # noqa: BLE001
+        return [Did("select loadouts", why=f"could not read the roster ({exc})")]
+    by_guid = {h.guid: h for h in town_now.heroes}
+    rows = {h.guid: i for i, h in enumerate(town_now.heroes)}
+    cursor: dict = {}
+    for seat in sorted(seats, key=lambda st: rows.get(st.hero.guid, 0)):
+        hero = by_guid.get(seat.hero.guid)
+        what = f"loadout {seat.hero.label()}"
+        if hero is None:
+            done.append(Did(what, why="not on the roster any more"))
+            continue
+        # The Abomination and the Duelist wear all seven, always; a mode
+        # decides which are usable (live 2026-09-27: the save "wears" seven).
+        if hero.hero_class in UNRESTRICTED_LOADOUT:
+            continue
+        costs = load_hero_costs(str(GAME_DIR), hero.hero_class)
+        order = list(costs.skills) if costs is not None else []
+        have = unlocked(profile, hero.hero)
+        selected = list(getattr(hero.hero, "selected_skills", None) or [])
+        off, on, target = loadout_toggles(order, selected, have, seat.skills)
+        if not off and not on:
+            continue
+        say(f"  [town] {what}: wear {', '.join(target)} "
+            f"(was {', '.join(selected) or 'nothing'})")
+        if not act:
+            done.append(Did(what, sent=False, why="not armed"))
+            continue
+        screen_row, why = _roster_row_for(win, backend, resolved, town_now,
+                                          rows[hero.guid], act=act, cursor=cursor)
+        if screen_row is None:
+            done.append(Did(what, why=why))
+            continue
+        backend.right_click(resolved.at(TL.roster_portrait(screen_row)))
+        time.sleep(PANEL_OPEN_SETTLE)
+        for i in off + on:
+            backend.click(resolved.at(TL.sheet_skill(i)))
+            time.sleep(0.3)
+        backend.click(resolved.at(TL.HERO_SHEET_CLOSE))
+        time.sleep(PANEL_OPEN_SETTLE)
+        try:
+            now = next((h for h in read_town_state(profile).heroes
+                        if h.guid == hero.guid), None)
+        except Exception:                              # noqa: BLE001
+            now = None
+        got = set(getattr(getattr(now, "hero", None), "selected_skills", None) or [])
+        ok = got == set(target)
+        done.append(Did(what, sent=True, confirmed=ok,
+                        why="" if ok else f"the save wears {sorted(got)}"))
+    return done
+
+
+def reset_trinkets(win, backend, resolved, profile, *, say=print,
+                   act: bool = False) -> list:
+    """Unequip every hero's trinkets and sort the chest by rarity.
+
+    Fran, 2026-09-26: *"Unequip all: before every embark, to know the whole
+    pool"*. One button does what the benched-strip pass did a drag at a time,
+    and the sort makes the chest's order a known function of the trinkets
+    (rarity rank, then display name -- measured 2026-09-27) that the game
+    also writes back to the save on the close. Witnessed by the save: nobody
+    wears anything afterwards.
+    """
+    from bridge import townlayout as TL                # noqa: PLC0415
+    from bridge.layout import MODAL_OK                 # noqa: PLC0415
+    from bridge.town_state import read_town_state      # noqa: PLC0415
+    label = "unequip all trinkets and sort by rarity"
+    if not act:
+        say(f"  [town] WOULD {label}")
+        return [Did(label, sent=False, why="not armed")]
+    for frac in (TL.TRINKET_CHEST_BUTTON, TL.TRINKET_UNEQUIP_ALL, MODAL_OK,
+                 TL.TRINKET_SORT_RARITY, TL.TRINKET_PANEL_CLOSE):
+        pt = resolved.at(frac)
+        if pt is None:
+            return [Did(label, why="no point for a chest control")]
+        backend.click(pt)
+        time.sleep(PANEL_OPEN_SETTLE)
+    try:
+        worn = sum(1 for h in read_town_state(profile).heroes
+                   for t in (getattr(h.hero, "trinkets", None) or []) if t)
+    except Exception as exc:                           # noqa: BLE001
+        return [Did(label, sent=True, why=f"could not re-read the roster ({exc})")]
+    say(f"  [town] {label}: {worn} still worn")
+    return [Did(label, sent=True, confirmed=worn == 0,
+                why="" if worn == 0 else f"{worn} trinket(s) still worn")]
+
+
+def equip_trinkets(win, backend, resolved, profile, plan, *, say=print,
+                   act: bool = False, strip: bool = True) -> list:
+    """`reset_trinkets` first, then `_equip_trinkets` on the whole pool. The
+    benched-strip pass stays as the fallback when the reset is unconfirmed."""
+    pre: list = []
+    cells = None
+    if strip and act:
+        pool = _trinket_pool(profile)
+        pre = reset_trinkets(win, backend, resolved, profile, say=say, act=act)
+        if pre and pre[-1].confirmed:
+            strip = False
+            # **The chest's order is COMPUTED, not read.** Right after an
+            # unequip-all the estate save still lists the chest as it was
+            # before the heroes' trinkets came back, and a whole party was
+            # equipped one cell off from it (live 2026-09-27). The rarity sort
+            # is a function of the pool (`data/trinket_order.py`, 37 of 37
+            # cells over two chests), so the cells are that function.
+            if pool is not None:
+                from data.trinket_order import rarity_sorted  # noqa: PLC0415
+                cells = dict(enumerate(rarity_sorted(pool)))
+    return pre + _equip_trinkets(win, backend, resolved, profile, plan,
+                                 say=say, act=act, strip=strip, cells=cells)
+
+
+def _trinket_pool(profile):
+    """Every trinket the estate owns: the chest plus what heroes wear."""
+    from bridge.town_state import (                    # noqa: PLC0415
+        find_profile, read_town_state, read_trinket_cells)
+    try:
+        chest = list(read_trinket_cells(
+            find_profile(str(profile) if profile else None)
+            / "persist.estate.json").values())
+        worn = [t for h in read_town_state(profile).heroes
+                for t in (getattr(h.hero, "trinkets", None) or []) if t]
+    except Exception:                                  # noqa: BLE001
+        return None
+    return chest + worn
+
+
+def _equip_trinkets(win, backend, resolved, profile, plan, *, say=print,
+                    act: bool = False, strip: bool = True,
+                    cells: Optional[dict] = None) -> list:
+    """Fill the party's EMPTY trinket slots with what the team-builder picks.
+
+    Fran (2026-09-25): *"No se equipa ningun tipo de trinket"*. The decision
+    is `bridge/trinketplan.py` (the dd-team-builder's `reequipParty`); this is
+    only the hands, measured live the same night: the bottom-bar chest opens
+    the Trinket Inventory, a right-click on a roster portrait opens the
+    hero's sheet beside it, and a drag from a cell to an Equipment slot
+    equips. What a party hero already wears is left alone -- this fills, it
+    never strips the party -- and every drag is checked on the SCREEN.
+
+    **Benched heroes are the chest's other half.** The loop picks a new party
+    most raids, so a trinket equipped last time sits on someone staying home.
+    The planner is offered those too; any it picks is first dragged off its
+    benched wearer (the panels then close, which saves), and the equip pass
+    runs again on the re-read estate with `strip=False`.
+    """
+    from bridge import townlayout as TL                # noqa: PLC0415
+    from bridge.town_state import (                    # noqa: PLC0415
+        find_profile, read_town_state, read_trinket_cells)
+    from bridge.trinketplan import plan_trinkets       # noqa: PLC0415
+
+    label = "equip trinkets"
+    try:
+        town_now = read_town_state(profile)
+        if cells is None:
+            cells = read_trinket_cells(
+                find_profile(str(profile) if profile else None)
+                / "persist.estate.json")
+    except Exception as exc:                           # noqa: BLE001
+        return [Did(label, why=f"could not read the estate ({exc})")]
+    seats = list(getattr(plan, "party", ()) or ())
+    party = {s.hero.guid for s in seats}
+    # (hero, list position, id) for everything a benched hero wears.
+    # The SLOT, not the list position: live 2026-09-26 a Plague Doctor wore
+    # speed_stone in slot 1 with slot 0 empty, the drag took slot 0, and the
+    # save rightly said the trinket was still on him.
+    benched = [] if not strip else [
+        (h, i, t) for h in town_now.heroes if h.guid not in party
+        for i, t in (sorted((getattr(h.hero, "trinket_slots", None) or {}).items())
+                     or list(enumerate(getattr(h.hero, "trinkets", None) or [])))
+        if t]
+    if not cells and not benched:
+        return [Did(label, why="no trinkets in the inventory")]
+    # **Only what the grid DRAWS is offered.** Three rows of seven are
+    # visible without the chest's scroll, which is not measured; live
+    # 2026-09-27 two picks sorted to cell 24 and could not be reached. A cell
+    # is its rank among the chest's trinkets, so the first 21 are the drawn.
+    visible = TL.TRINKET_GRID_COLS * TL.TRINKET_GRID_ROWS_VISIBLE
+    cells = dict(sorted(cells.items())[:visible])
+    wanted = plan_trinkets([(s.hero.hero_class, list(s.skills)) for s in seats],
+                           list(cells.values()) + [t for _h, _i, t in benched])
+    if not wanted:
+        return [Did(label, why="the team-builder proposed nothing "
+                               "(or node is unavailable)")]
+    free = dict(cells)                                 # cell -> id, shrinking
+    loose = list(benched)                              # benched, shrinking
+    jobs = []                                          # (seat, held, [(cell, id)])
+    strips = []                                        # (hero, position, id)
+    for seat, picks in zip(seats, wanted):
+        # What the hero wears NOW, from the save read above -- not the embark
+        # plan's snapshot, which predates the unequip-all (live 2026-09-27:
+        # an Arbalest "still held" a survival guide the reset had taken off,
+        # so only one of two slots was filled).
+        now_hero = next((h for h in town_now.heroes
+                         if h.guid == seat.hero.guid), seat.hero)
+        held = [t for t in (getattr(now_hero.hero, "trinkets", None) or []) if t]
+        room = 2 - len(held)
+        chosen = []
+        for tid in picks:
+            if room <= 0:
+                break
+            if tid in held:
+                continue
+            cell = next((c for c, t in sorted(free.items()) if t == tid), None)
+            if cell is not None:
+                chosen.append((cell, tid))
+                del free[cell]
+                room -= 1
+                continue
+            worn = next((w for w in loose if w[2] == tid), None)
+            if worn is not None:
+                strips.append(worn)
+                loose.remove(worn)
+                room -= 1
+        if chosen:
+            jobs.append((seat, held, chosen))
+    if strips:
+        for hero, _i, tid in strips:
+            say(f"  [town] TRINKET take {tid} off benched {hero.hero_class}")
+        if not act:
+            return [Did(label, sent=False, why="not armed")]
+        done = _strip_trinkets(win, backend, resolved, profile, town_now,
+                               len(cells), strips, say=say, act=act)
+        return done + equip_trinkets(win, backend, resolved, profile, plan,
+                                     say=say, act=act, strip=False)
+    if not jobs:
+        return [Did(label, why="every party slot is already filled or no pick "
+                               "is in the inventory")]
+    for seat, held, chosen in jobs:
+        say(f"  [town] TRINKET {seat.hero.hero_class}: "
+            + ", ".join(f"{t} (cell {c})" for c, t in chosen))
+    if not act:
+        return [Did(label, sent=False, why="not armed")]
+
+    from bridge import screen as screen_mod           # noqa: PLC0415
+    done: list = []
+    left = set(cells)                                  # save keys still in the chest
+    cursor: dict = {}
+    rows = {h.guid: i for i, h in enumerate(town_now.heroes)}
+    jobs.sort(key=lambda j: rows.get(j[0].hero.guid, 0))
+    for seat, held, chosen in jobs:
+        what = f"equip {seat.hero.hero_class}"
+        why = _open_sheet_with_chest(win, backend, resolved, town_now,
+                                     seat.hero.guid, act=act, cursor=cursor)
+        if why:
+            done.append(Did(what, why=why))
+            continue
+        slot_i = len(held)
+        # **The grid COMPACTS when it is reopened.** Within one opening a
+        # taken trinket leaves a hole, but closing and reopening the panel
+        # packs what is left to the front. Live 2026-09-25 the second hero
+        # was handed the trinket one cell to the right of the plan. So a
+        # cell's place is its rank among the trinkets still there when the
+        # panel opened, and `left` is only shrunk after the panel closes.
+        at_open = sorted(left)
+        taken = []
+        for key, tid in chosen:
+            cell = at_open.index(key)
+            if cell >= TL.TRINKET_GRID_COLS * TL.TRINKET_GRID_ROWS_VISIBLE:
+                done.append(Did(f"{what} {tid}",
+                                why=f"cell {cell} is below the visible grid"))
+                continue
+            dst_frac = TL.HERO_TRINKET_SLOTS[min(slot_i, 1)]
+            src, dst = resolved.at(TL.trinket_cell(cell)), resolved.at(dst_frac)
+            before = screen_mod.grab(win)
+            sent = bool(backend.drag(src, dst))
+            time.sleep(PANEL_OPEN_SETTLE)
+            after = screen_mod.grab(win)
+            diff = (_slot_box_diff(before, after, resolved, dst_frac)
+                    if before is not None and after is not None else None)
+            ok = sent and diff is not None and diff > TRINKET_SLOT_CHANGED
+            done.append(Did(f"{what} {tid}", sent=sent, confirmed=ok,
+                            why=f"slot changed by {diff:.1f}" if diff is not None
+                                else "no frame to check"))
+            if ok:
+                slot_i += 1
+                taken.append(key)
+        left.difference_update(taken)
+        _close_sheet_and_chest(backend, resolved)
+    # **The save says what each hero ended up wearing**, and a slot that
+    # changed on screen is not proof it was the RIGHT trinket.
+    try:
+        worn = {h.guid: sorted(getattr(h.hero, "trinkets", None) or [])
+                for h in read_town_state(profile).heroes}
+    except Exception:                                  # noqa: BLE001
+        worn = None
+    if worn is not None:
+        for seat, held, chosen in jobs:
+            want = sorted(list(held) + [t for _c, t in chosen])
+            got = worn.get(seat.hero.guid, [])
+            ok = got == want
+            done.append(Did(f"trinkets on {seat.hero.hero_class}", sent=True,
+                            confirmed=ok,
+                            why="" if ok else f"wears {got}, planned {want}"))
+    return done
+
+
+def _strip_trinkets(win, backend, resolved, profile, town_now, in_chest: int,
+                    strips, *, say=print, act: bool = False) -> list:
+    """Drag trinkets off benched heroes into the chest's first empty cells.
+
+    The save does not keep a hero's slot KEYS (`live_state._item_ids` lists
+    ids), so the slot is the id's list position -- right for a hero whose
+    slots fill from the left, which is how `equip_trinkets` fills them. The
+    witness is the save re-read after the close, not a guess about the slot.
+    """
+    from bridge import townlayout as TL                # noqa: PLC0415
+    from bridge.town_state import read_town_state      # noqa: PLC0415
+    by_hero: dict = {}
+    for hero, pos, tid in strips:
+        by_hero.setdefault(hero.guid, (hero, []))[1].append((pos, tid))
+    sent_for: list = []                                # (guid, class, id, sent)
+    failed: list = []
+    dropped = 0
+    cursor: dict = {}
+    rows = {h.guid: i for i, h in enumerate(town_now.heroes)}
+    for guid, (hero, items) in sorted(by_hero.items(),
+                                      key=lambda kv: rows.get(kv[0], 0)):
+        why = _open_sheet_with_chest(win, backend, resolved, town_now, guid,
+                                     act=act, cursor=cursor)
+        if why:
+            failed.append(Did(f"strip {hero.hero_class}", why=why))
+            continue
+        # Right slot first, so taking it cannot shift the left one.
+        for pos, tid in sorted(items, reverse=True):
+            cell = in_chest + dropped
+            if cell >= TL.TRINKET_GRID_COLS * TL.TRINKET_GRID_ROWS_VISIBLE:
+                failed.append(Did(f"strip {tid}",
+                                  why="the chest's visible grid is full"))
+                continue
+            sent = bool(backend.drag(resolved.at(TL.HERO_TRINKET_SLOTS[min(pos, 1)]),
+                                     resolved.at(TL.trinket_cell(cell))))
+            time.sleep(PANEL_OPEN_SETTLE)
+            dropped += 1 if sent else 0
+            sent_for.append((guid, hero.hero_class, tid, sent))
+        _close_sheet_and_chest(backend, resolved)
+    try:
+        worn = {h.guid: list(getattr(h.hero, "trinkets", None) or [])
+                for h in read_town_state(profile).heroes}
+    except Exception:                                  # noqa: BLE001
+        worn = None
+    done = list(failed)
+    for guid, cls, tid, sent in sent_for:
+        ok = sent and worn is not None and tid not in worn.get(guid, [])
+        done.append(Did(f"strip {tid} off {cls}", sent=sent, confirmed=ok,
+                        why="" if ok else "the save still has it on the hero"))
     return done
 
 

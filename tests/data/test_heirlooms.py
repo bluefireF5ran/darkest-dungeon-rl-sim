@@ -279,9 +279,20 @@ def test_the_rank_of_a_tree_is_HOW_MANY_entries_it_has():
     import json
     from data.dson import dd_name_hash
 
+    # MODS EXTEND THE TOWN TREES, and the live save was played with them.
+    # `stage_coach.numrecruits` is 5 ranks shipped and 6 in a Workshop
+    # override; `upgraded_recruits` goes 3 -> 6 and `nomad_wagon.numitems`
+    # 4 -> 5. So a save can legitimately hold more purchases than the
+    # SHIPPED tree has ranks, and this read that as corruption. The
+    # invariant that survives is "no more purchases than the largest tree
+    # under that id anywhere on this machine", so take the max.
     ranks = {}
-    upgrades = Path(GAME_DIR) / "upgrades"
-    for f in upgrades.rglob("*.upgrades.json"):
+    roots = [Path(GAME_DIR) / "upgrades"]
+    _workshop = Path(
+        r"D:/Program Files (x86)/Steam/steamapps/workshop/content/262060")
+    if _workshop.is_dir():
+        roots.append(_workshop)
+    for f in [g for r in roots for g in r.rglob("*.upgrades.json")]:
         try:
             raw = json.load(open(f, encoding="utf-8", errors="replace"))
         except (OSError, ValueError):
@@ -289,8 +300,9 @@ def test_the_rank_of_a_tree_is_HOW_MANY_entries_it_has():
         for tree in raw.get("trees") or []:
             tid = str(tree.get("id") or "")
             if tid:
-                ranks[dd_name_hash(tid) & 0xFFFFFFFF] = len(
-                    tree.get("requirements") or [])
+                _h = dd_name_hash(tid) & 0xFFFFFFFF
+                ranks[_h] = max(ranks.get(_h, 0),
+                                len(tree.get("requirements") or []))
 
     counts = read_rank_counts(SAVE)
     assert counts, "a Week 22 save has purchases"
@@ -384,6 +396,17 @@ def test_a_missing_file_reads_as_nothing_bought():
     assert read_purchased(Path("Z:/no/such/persist.upgrades.json"), []) == set()
 
 
+def test_a_fresh_campaigns_plain_json_file_is_read():
+    """The starting save is plain JSON with the purchases under `data`, and
+    it used to read as nothing bought (2026-10-10). Its 14 entries are the
+    two starting heroes' unlocked skills; the template ships them.
+    The rank-1 heroes are guid 1 and 2 (Reynauld, Dismas)."""
+    start = GAME_DIR / "scripts" / "starting_save" / "persist.upgrades.json"
+    counts = read_rank_counts(start)
+    assert len(counts) == 14
+    assert {inst for _tree, inst in counts} == {1, 2}
+
+
 def test_purchased_codes_come_back_in_FILE_order(coach):
     """A count of N means the first N codes, because a rank's prerequisite is
     the rank below it -- which is why a bare count is enough."""
@@ -403,3 +426,59 @@ def test_purchased_codes_come_back_in_FILE_order(coach):
            for c in codes[:counts.get(dson.dd_name_hash(tid) & 0xFFFFFFFF, 0)]}
     assert got == {("stage_coach.numrecruits", "a"),
                    ("stage_coach.numrecruits", "b")}
+
+def test_each_region_elevates_exactly_one_heirloom_except_the_cove():
+    """The shipped drop tables settle a community claim, and correct it.
+
+    `loot/loot.json` gives every heirloom entry a `dungeon` and a `chances`
+    weight. Three regions elevate exactly one heirloom to 3 against a baseline
+    of 1 -- Ruins/crypts busts, Weald deeds, Warrens portraits -- which is
+    what the guides say. **Crest is 3 in all four**, so "Cove -> crests" names
+    the universal baseline and not a Cove speciality: the Cove elevates
+    nothing. A router that took the guide literally would send a party there
+    for crests it would have got anywhere.
+    """
+    from data.heirlooms import heirloom_bias, regions_for
+    from data.paths import GAME_DIR
+
+    bias = heirloom_bias(GAME_DIR)
+    assert set(bias) == {"cove", "crypts", "warrens", "weald"}, sorted(bias)
+    assert bias["crypts"] == {"bust": 3, "deed": 1, "portrait": 1, "crest": 3}
+    assert bias["weald"] == {"bust": 1, "deed": 3, "portrait": 1, "crest": 3}
+    assert bias["warrens"] == {"bust": 1, "deed": 1, "portrait": 3, "crest": 3}
+    assert bias["cove"] == {"bust": 1, "deed": 1, "portrait": 1, "crest": 3}
+
+    # Crest is the baseline everywhere, so it cannot pick a region.
+    assert all(b["crest"] == 3 for b in bias.values())
+
+    assert regions_for("bust", GAME_DIR) == ["crypts"]
+    assert regions_for("deed", GAME_DIR) == ["weald"]
+    assert regions_for("portrait", GAME_DIR) == ["warrens"]
+    assert regions_for("crest", GAME_DIR) == ["cove", "crypts", "warrens", "weald"]
+
+
+def test_the_heirloom_weights_do_not_vary_by_difficulty_tier():
+    """`chances` is constant per (dungeon, heirloom) across tiers 1/3/5; it is
+    `amount` that scales (bust 2/3/4, crest 4/6/8). `heirloom_bias` collapses
+    the tier with `max`, which is only sound because of this -- summing would
+    invent a tier effect the weights do not have."""
+    import json
+    from pathlib import Path
+    from data.heirlooms import HEIRLOOMS
+    from data.paths import GAME_DIR
+
+    raw = json.loads((Path(GAME_DIR) / "loot" / "loot.json")
+                     .read_text(encoding="utf-8", errors="replace"))
+    seen = {}
+    for table in raw["loot_tables"]:
+        dungeon = table.get("dungeon") or ""
+        if not dungeon:
+            continue
+        for entry in table.get("entries") or ():
+            data = entry.get("data") or {}
+            if data.get("type") != "heirloom" or data.get("id") not in HEIRLOOMS:
+                continue
+            seen.setdefault((dungeon, data["id"]), set()).add(entry.get("chances"))
+    assert seen, "no dungeon-keyed heirloom rows -- the tables moved"
+    varying = {k: sorted(v) for k, v in seen.items() if len(v) > 1}
+    assert not varying, f"chances varies by tier for {varying}"

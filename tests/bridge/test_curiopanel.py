@@ -235,6 +235,19 @@ def test_both_real_panels_put_the_hand_at_the_same_place():
     assert abs(a.items[0][0] - b.items[0][0]) < 0.002
 
 
+def test_an_x_merged_with_red_rubble_is_still_found():
+    """Live 2026-09-27: a Rubble panel's X shared its rows with red rubble and
+    joined a 347-px cluster; the party pressed W at an open panel for a whole
+    iteration. The tight-gap fallback reads it."""
+    frame = CAPTURES / "curio_rubble_merged_x.png"
+    found = curiopanel.find(_load(frame))
+    assert found is not None and found.readable
+    x_px = found.close[0] * 1280
+    assert abs(x_px - 974) < 4
+    assert found.sole_item() is not None
+
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
 

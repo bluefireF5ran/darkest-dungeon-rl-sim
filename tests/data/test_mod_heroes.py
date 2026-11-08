@@ -53,16 +53,21 @@ def _workshop_has_content() -> bool:
     The suite's greenness must not depend on what Steam has finished
     downloading. `tests/data/test_mod_kit.py` never had this problem because it
     gates on ONE named mod directory; this is the same predicate, generalised.
+
+    **Content is not CLASS content either (2026-09-23).** Fran's campaign
+    subscriptions are 17 UI/QoL mods and not one hero class, and the old
+    `any(iterdir())` gate ran these tests against them and failed the same
+    three ways. The predicate is now what the loader itself globs for.
     """
     try:
-        return any(WORKSHOP.iterdir())
+        return any(WORKSHOP.glob("*/**/heroes/*/*.info.darkest"))
     except OSError:
         return False
 
 
 needs_mods = pytest.mark.skipif(
     not _workshop_has_content(),
-    reason="no Steam Workshop content for 262060 on this machine")
+    reason="no Workshop HERO-CLASS mod for 262060 on this machine")
 
 
 def _load(roots=None):
@@ -138,9 +143,14 @@ def test_a_discovered_class_has_the_vanilla_SHAPE():
             # Not malformed -- a real class the ACTION SPACE cannot hold.
             # Checked against the gate below rather than failed here.
             oversized.append(hid)
-        elif len(h.skills) != MAX_SKILL_SLOTS:
-            bad.append(f"{hid}: {len(h.skills)} skills, engine has "
-                       f"{MAX_SKILL_SLOTS} slots")
+        # FEWER skills than slots is fine and is not checked: the block
+        # pads and the action mask marks the empty slots illegal, so the
+        # class simply has less to choose from. Only MORE is a problem,
+        # because the action space cannot hold them -- which is the
+        # asymmetry above. `littlepiglet` ships 4 skills and fights fine
+        # (`test_a_discovered_class_can_actually_FIGHT` covers 220
+        # classes including it); calling that malformed was this test
+        # asserting "exactly 7" while meaning "at most 7".
         if len(h.weapon_tiers) != 5:
             bad.append(f"{hid}: {len(h.weapon_tiers)} weapon tiers, want 5")
         if len(h.armour_tiers) != 5:

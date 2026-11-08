@@ -1,4 +1,5 @@
 from __future__ import annotations
+import math
 from dataclasses import dataclass
 from typing import Optional
 from .combatant import CombatantState
@@ -108,7 +109,8 @@ def resolve_to_hit(roll: float, hit_chance: float, rules: CombatRules) -> bool:
 
 
 def check_crit(attacker: CombatantState, target: CombatantState,
-                skill: SkillLevelData, rng: SeededRNG) -> bool:
+                skill: SkillLevelData, rng: SeededRNG,
+                crit_roll: Optional[float] = None) -> bool:
     # Real bug found and fixed: is_crit_valid (default True; 65 real skill-
     # level records across 10 hero files explicitly set it False -- e.g.
     # Plague Doctor's blinding_gas/disorienting_blast, Arbalest/Musketeer's
@@ -122,7 +124,8 @@ def check_crit(attacker: CombatantState, target: CombatantState,
     # raises the DEFENDER's chance of being crit against, on top of the
     # attacker's own crit + skill crit.
     crit_chance = attacker.crit + skill.crit + target.crit_received_bonus
-    return rng.random() < crit_chance
+    roll = rng.random() if crit_roll is None else crit_roll
+    return roll < crit_chance
 
 
 def compute_excess_crit_bonus(attacker: CombatantState, skill: SkillLevelData,
@@ -151,6 +154,8 @@ def resolve_attack(
     damage_multiplier: float = 1.0,
     acc_bonus: float = 0.0,
     hit_roll: Optional[float] = None,
+    crit_roll: Optional[float] = None,
+    damage_u: Optional[float] = None,
 ) -> AttackResult:
     """`hit_roll` lets a multi-target skill supply ONE roll for all its targets.
 
@@ -160,6 +165,13 @@ def resolve_attack(
     zero counterexamples, while crit and damage stayed per-target. See
     CHANGELOG.md. Leave it `None` (the default) for single-target attacks so the
     RNG stream is byte-identical to before this parameter existed.
+
+    `crit_roll` and `damage_u` are the GAME's own draws for this target, known
+    in advance from the save's RNG state (`engine/game_rng.py`, DECOMP.md F15).
+    Supplied together with `hit_roll` by `CombatEngine.fate`; when given, no
+    draw is taken for them. The damage is the game's integer
+    `lo + int(u * (hi - lo + 1))` over the skill-modified range, expressed back
+    in the engine's base units so every multiplier after it applies as usual.
     """
     result = AttackResult()
     hit_chance = compute_hit_chance(attacker, target, skill, rules, acc_bonus)
@@ -180,10 +192,17 @@ def resolve_attack(
         return result
 
     result.crit_chance = attacker.crit + skill.crit + target.crit_received_bonus
-    result.is_crit = check_crit(attacker, target, skill, rng)
+    result.is_crit = check_crit(attacker, target, skill, rng, crit_roll=crit_roll)
     result.excess_crit_bonus = compute_excess_crit_bonus(attacker, skill, rules)
 
-    base_damage = rng.uniform(float(attacker.dmg_min), float(attacker.dmg_max))
+    if damage_u is None:
+        base_damage = rng.uniform(float(attacker.dmg_min), float(attacker.dmg_max))
+    else:
+        m = 1.0 + skill.dmg_mod
+        lo = math.ceil(attacker.dmg_min * m - 1e-9)
+        hi = math.ceil(attacker.dmg_max * m - 1e-9)
+        drawn = lo + int(damage_u * (hi - lo + 1))
+        base_damage = drawn / m if m > 0 else float(drawn)
     if result.is_crit:
         # Wiki-confirmed (darkestdungeon.wiki.gg/wiki/Critical_Hit, corroborated
         # by a second source): "A critical hit's damage is equal to 150% of the
@@ -221,6 +240,16 @@ def resolve_attack(
         prot = min(target.prot, PROT_DAMAGE_REDUCTION_CAP)
         applied *= (1.0 - prot)
         result.prot_applied = prot
+    # A monster skill shipped at `.dmg 0 0` (182 of 892 monster skill lines:
+    # the Prophet's mark, every stress attack, curses, guards) deals NOTHING:
+    # the game's own trace logs no damage draw for one (tools/CLAUDE.md, the
+    # hit oracle). The floor below would give it 1, and a hit on a hero at
+    # Death's Door would then roll a deathblow off a scream. It still lands,
+    # so its effects and stress apply; it consumes no Aegis Block either,
+    # which is spent only by "non-zero direct damage".
+    if not attacker.is_hero and attacker.dmg_max <= 0:
+        result.raw_damage = result.applied_damage = 0
+        return result
     applied = max(1, round(applied))
 
     # Shieldbreaker's Aegis Block (Serpent's Sway) -- "When hit by any non-

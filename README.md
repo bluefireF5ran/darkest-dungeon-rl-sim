@@ -2,23 +2,13 @@
 
 Turn-based combat simulator for Darkest Dungeon, designed as a Gym environment for RL training.
 
-> **This repository contains source code only.** The game's data files, the CSV exports
-> derived from them and the reference screenshots are not redistributed here — they belong
-> to Red Hook Studios. The loaders read them from your own installation of the game, so you
-> need to own it and export the metadata yourself before the tests will run. Trained
-> checkpoints and evaluation logs are also left out for size; the numbers they produced are
-> in [Training results](#training-results) below.
-
-
 ## Setup
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Requires an installed copy of the game, and the metadata CSVs exported from it into
-`metadata/`. Point the loader at wherever you installed it; the path is an argument,
-not a constant.
+Requires the game installed at `D:\Program Files (x86)\Steam\steamapps\common\DarkestDungeon` and the CSV exports in this repo.
 
 ## Run tests
 
@@ -141,30 +131,6 @@ while not done:
 # episode ends on a full party wipe or the last sampled combat finishing —
 # a single hero death does not end it, the expedition continues with survivors
 ```
-
-
-## Training results
-
-PPO agents (stable-baselines3) on `ExpeditionSequenceEnv`, where one episode is a full
-8-18 combat expedition. Mean episode reward from SB3's `EvalCallback`, 200 evaluations per
-run. Every configuration runs on two seeds, and ablations are contrasted against a control.
-
-| Run | Steps | Reward, first eval | Reward, last eval | Best (at step) |
-|---|---:|---:|---:|---:|
-| `mods_s1` | 12 M | −110.68 | 67.25 | 122.05 (6.78 M) |
-| `mods` | 12 M | −158.55 | 9.64 | 116.40 (10.98 M) |
-| `mods54_knobs_s1` | 12 M | −111.42 | 6.56 | 98.45 (8.94 M) |
-| `mods54_knobs_s0` | 12 M | −188.79 | −32.67 | 106.97 (8.40 M) |
-| `mods47_control_s1` | 3 M | −76.47 | 66.23 | 108.32 (2.94 M) |
-| `mods47_heldout_s1` | 3 M | −125.78 | −35.18 | 107.09 (2.10 M) |
-
-The reward is shaped, so its absolute scale is not meaningful on its own — what it shows is
-the agent going from losing expeditions to finishing them. The gap between `control` and
-`heldout` is the point of that pair: the held-out runs face party compositions the agent
-never trained on.
-
-Reward shaping is potential-based (Ng, Harada & Russell, 1999), which guarantees the shaping
-cannot change which policy is optimal. See `docs/ASSUMPTIONS.md` and `tests/env/test_reward.py`.
 
 ## Project structure
 

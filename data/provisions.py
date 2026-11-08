@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import json
 from functools import lru_cache
+from typing import Optional
 from pathlib import Path
 
 from data.darkest_parser import DarkestParser
@@ -255,7 +256,8 @@ def granted(hero_classes=(), length: int = 1,
 
 
 def basket(zone: str, length: int, level: str = RESERVE,
-           game_dir: str = str(GAME_DIR), party=()) -> dict[str, int]:
+           game_dir: str = str(GAME_DIR), party=(),
+           derived: Optional[dict] = None) -> dict[str, int]:
     """What to BUY for one expedition: `{item id: quantity}`.
 
     Bounded four ways, and each bound is a different kind of fact: the GUIDE is
@@ -280,8 +282,15 @@ def basket(zone: str, length: int, level: str = RESERVE,
     stock = store_stock(length, game_dir)
     free = granted(party, length, game_dir)
     out: dict[str, int] = {}
-    for item, pair in table.items():
-        want = pair[pick]
+    # **`derived` overrides the table item by item** (PLAYBOOK 7.7): the
+    # quantities `bridge/provision_needs.py` derives from the game's own map
+    # and curio data. An item it does not derive (torches) keeps the table's.
+    derived = dict(derived or {})
+    items = dict(table)
+    for item in derived:
+        items.setdefault(item, (0, 0))
+    for item, pair in items.items():
+        want = derived[item] if item in derived else pair[pick]
         if item == "food":
             want = max(want, minimum_food(length, game_dir))
         want -= free.get(item, 0)
@@ -305,6 +314,48 @@ def cost(want: dict[str, int], game_dir: str = str(GAME_DIR)) -> int:
 # pay in.
 CUT_ORDER = ("shovel", "medicinal_herbs", "skeleton_key", "holy_water",
              "bandage", "antivenom", "laudanum", "torch", "food")
+
+
+#: What leftover gold is spent on, in order. Fran, 2026-09-21: *"we should
+#: buy extra food and torches if we have money on the provisions (max if
+#: possible)"*.
+#:
+#: Torch first because that is the shortfall the loop MEASURED: a live raid
+#: bought eight, ran out before `rooF`, and then took a fight at torch 6 --
+#: the hard floor only binds *while the pack can afford the light*, so an
+#: empty pack silently turns the whole torch policy off. Food second because
+#: its floor is a dialog the game raises for you, so being short is loud
+#: rather than silent.
+TOP_UP_ORDER = ("torch", "food")
+
+
+def top_up(want: dict[str, int], gold: int, length: int,
+           game_dir: str = str(GAME_DIR)) -> dict[str, int]:
+    """Spend leftover gold on torches and food, up to what the shop sells.
+
+    The GUIDE says what to CARRY for a normal run; it is not a budget. When
+    the wallet is bigger than the guide, the difference is better held as
+    light and food than as gold sitting in the estate -- a torch is a damage
+    modifier on every fight in the dungeon and a loot multiplier on every
+    curio, and the shop's own stock is the ceiling.
+
+    `afford` is the other direction and they compose: cut to fit first, then
+    top up with whatever is left. Returns a new dict; `want` is unchanged.
+    """
+    unit = prices(game_dir)
+    stock = store_stock(length, game_dir)
+    out = dict(want)
+    spare = int(gold) - cost(out, game_dir)
+    for item in TOP_UP_ORDER:
+        price = unit.get(item, 0)
+        room = stock.get(item, 0) - out.get(item, 0)
+        if price <= 0 or room <= 0:
+            continue
+        add = min(room, spare // price)
+        if add > 0:
+            out[item] = out.get(item, 0) + add
+            spare -= add * price
+    return out
 
 
 def afford(want: dict[str, int], gold: int,

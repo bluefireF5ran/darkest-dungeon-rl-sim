@@ -46,7 +46,11 @@ ALLOWED = {
     "engine": {"data"},
     "env": {"data", "engine"},
     "bridge": {"data", "engine", "env", "tools", "train", "eval_expedition"},
-    "tools": {"data", "engine", "env", "bridge", "train", "eval_expedition"},
+    "tools": {"data", "engine", "env", "bridge", "campaign", "train", "eval_expedition"},
+    #: The campaign simulator (docs/CAMPAIGN_SIM.md) sits beside `bridge`:
+    #: it reuses the bridge's pure decide layers over `TownState`, so the
+    #: simulated Hamlet decides exactly as the live player does.
+    "campaign": {"data", "engine", "env", "bridge", "eval_expedition"},
 }
 
 REPO_MODULES = set(ALLOWED) | {"train", "eval_expedition"}

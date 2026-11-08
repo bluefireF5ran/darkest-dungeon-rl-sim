@@ -30,7 +30,7 @@ def test_monster_heal_field_now_parses():
     sk = next(s for s in shaman.skills if s.id == "head_heal")
     sd = sk.levels[max(sk.levels.keys())]
     assert (sd.heal_min, sd.heal_max) == (6, 12), (sd.heal_min, sd.heal_max)
-    assert sd.atk_dmg_min is None and sd.atk_dmg_max is None  # .dmg 0 0 -> falsy -> None
+    assert (sd.atk_dmg_min, sd.atk_dmg_max) == (0, 0)  # .dmg 0 0 is a real band (2026-10-06)
     assert sd.targets_allies is True
     print("  PASS test_monster_heal_field_now_parses")
 

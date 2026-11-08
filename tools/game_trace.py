@@ -117,7 +117,9 @@ class Other(Event):
 
 # --- parsing ----------------------------------------------------------------
 
-_PID_PREFIX = re.compile(r"^\[(\d+)\]\s?")
+#: `@<unix time> ` is optional: `dbwin_capture.py --stamp` writes it so a trace
+#: pairs with the saves of the same session (tools/damage_oracle.py).
+_PID_PREFIX = re.compile(r"^(?:@[\d.]+ )?\[(\d+)\]\s?")
 _RE_UNIFORM = re.compile(r"Name: (\w+) Random uniform: ([\d.]+) Seed: (\d+)")
 _RE_INT_AB = re.compile(r"Name: (\w+) Random int range A,B: (\d+) , (\d+) Value: (\d+) Seed: (\d+)")
 _RE_INT = re.compile(r"Name: (\w+) Random int range: (\d+) Value: (\d+) Seed: (\d+)")

@@ -57,7 +57,12 @@ TORCH_STEP = 25.0
 TORCH_CLICK_GAP = 0.35
 # How many SHIFT+clicks the fallback may send before giving up. 100 -> 0 is
 # four, and the bound is what stops a mis-read torch level clicking forever.
-TORCH_MAX_CLICKS = 6
+# 100 -> 0 is FOUR shift-clicks at 25 each, and the budget has to cover that
+# whole ladder plus the ones the game swallows. It was 6, which fitted a
+# single click plus a five-click recovery under the old model where the first
+# gesture was meant to be a one-click full snuff -- a model measured false on
+# 2026-09-21. Clicking at 0 is harmless: the light cannot go lower.
+TORCH_MAX_CLICKS = 10
 
 # How long a modifier is held BEFORE the button goes down, and it is not
 # padding. SDL tracks SHIFT and CTRL from its own key events, so the game only
@@ -66,7 +71,24 @@ TORCH_MAX_CLICKS = 6
 # at 60. The old 20ms was inside that margin, which makes "the modifier did not
 # reach the game" indistinguishable from "the pixel is wrong", and the torch
 # snuff has already been blamed on the pixel twice. 120ms is ~7 frames.
-MOD_DWELL = 0.12
+# **HOW LONG A MODIFIER IS HELD BEFORE THE CLICK, AND IT DECIDES WHICH ACTION
+# THE GAME PERFORMS.** Measured live 2026-09-21 against DD's own light
+# tooltip, at the torch dial, starting from 0:
+#
+#   | gesture           | at 0.12s      | at 0.35s HELD |
+#   |-------------------|---------------|---------------|
+#   | plain click       | +25           | +25           |
+#   | SHIFT+click       | +25 (!)       | -25           |
+#   | CTRL+SHIFT+click  | -25 (!)       | -100, snuffed |
+#
+# At 0.12s the modifiers were arriving PARTIALLY -- CTRL+SHIFT read as SHIFT
+# and SHIFT read as no modifier at all -- so the bridge was raising the torch
+# while its log said it was lowering it. `GetAsyncKeyState` said the keys were
+# down in every one of those cases, so the OS is not the thing that was
+# behind: SDL had not processed the key event yet when the click arrived.
+# Fran's diagnosis was the fix: *"we can hold ctrl or shift rather than doing
+# at the same time for better measure"*.
+MOD_DWELL = 0.35
 
 # How many times a torch reading is re-taken before "it did not move" is
 # believed. The save is written per TURN in a raid, so a reduction made
@@ -87,6 +109,16 @@ VK_T = 0x54
 # SHIFT+CTRL+CLICK, and SHIFT alone on the same widget merely REDUCES the
 # torch. Naming both is what keeps those two apart.
 VK_CONTROL = 0x11
+
+# **THE SIDED VARIANTS ARE WHAT A REAL KEYBOARD SENDS, AND THE TORCH GESTURE
+# WANTS THEM.** Fran, 2026-09-21, having watched a snuff raise the torch
+# instead: *"with ctrl+shift+click we can snuff it all in one click"* and
+# *"left ctrl i think"*. `SendInput` with the generic 0x10/0x11 leaves the
+# sided state unset, and a click whose modifier SDL does not see is not a
+# weaker snuff -- on this widget a bare click USES a torch, which is the
+# opposite play. Measured that day: 82 -> 100 on a killing blow.
+VK_LSHIFT = 0xA0
+VK_LCONTROL = 0xA2
 SKILL_VKS = (VK_1, VK_2, VK_3, VK_4, VK_5)
 
 # The kill switch. NOT F10 -- `overlay.py` already polls that to close itself,
@@ -192,6 +224,19 @@ MAP_RESET_STEP = 0.25
 
 MOUSEEVENTF_LEFTDOWN = 0x0002
 MOUSEEVENTF_LEFTUP = 0x0004
+# **THE RIGHT BUTTON IS A VERB THIS GAME NEEDS, and the bridge had none.**
+# `[pc]str_help_raid_room_6`: *"While interacting with an object:
+# [RIGHT-CLICK] an inventory item to apply it to the object."* That is how a
+# skeleton key opens a locked chest and how a shovel clears a blockage -- and
+# with no right click anywhere in the actuator, every loot curio that wanted
+# an item was unreachable. Fran, 2026-09-21: *"the model seems to be unable
+# to use inventory items to right click with curio, specially with loot
+# curios"*.
+#
+# `str_help_raid_combat_3` names the same verb for Anti-Venom and Bandages
+# in combat, so this is not a curio special case.
+MOUSEEVENTF_RIGHTDOWN = 0x0008
+MOUSEEVENTF_RIGHTUP = 0x0010
 SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN = 78, 79
 SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN = 76, 77
 KEYEVENTF_SCANCODE = 0x0008
@@ -253,7 +298,9 @@ BLIND_CANDIDATES = 5
 # How many fresh frames to try before the re-measure gives up, and how long
 # between them. The panel animates, so one grab is a coin flip on whether it
 # fits; six over ~1.2 s is what makes the guard a check rather than a blocker.
-MAP_REFIT_TRIES = 6
+# 12 since 2026-09-23: sampling now stops as soon as two fits agree, so a
+# longer window costs nothing on a still map and outlasts the easing.
+MAP_REFIT_TRIES = 12
 MAP_REFIT_STEP = 0.25
 # How long to let the tooltip appear after the pointer lands, and after it is
 # parked again. DD draws it on a short delay, and the same wait on the way out
@@ -377,7 +424,11 @@ MAX_DEFERRALS = 12
 BAR_SETTLE_FOR = 0.6
 BAR_SETTLE_STEP = 0.15
 
-DOOR_TRIES = 3
+DOOR_TRIES = 5
+#: The A (or D) hold before each retry after the first: about two hero
+#: widths first, then quarter-second steps (live 2026-09-26: the door opened
+#: at 1.0 s of backing from the far end).
+DOOR_BACKOFF = (0.75, 0.25, 0.25, 0.25)
 # Same shape for a formation swap: the two heroes trade places on screen and
 # the save follows when they land. One 0.6s look called a swap that worked a
 # failure -- see `_swap_ranks`.

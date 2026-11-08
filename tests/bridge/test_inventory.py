@@ -362,3 +362,41 @@ def test_the_note_and_the_plan_agree_on_every_real_pack():
     # agreed only by both saying nothing.
     assert seen > 300, seen
     assert merged > 20, merged
+
+
+def test_a_surplus_provision_stack_is_offered_for_loot_room():
+    """2026-09-27: 33 of 37 curios given up came after "no room". Only a stack
+    wholly beyond the raid's reserve, and cheap, is offered."""
+    from bridge.inventory import Slot, plan_surplus_discard
+    pack = [Slot(0, "supply", "torch", 8), Slot(1, "supply", "bandage", 1),
+            Slot(2, "supply", "antivenom", 2), Slot(3, "provision", "", 12),
+            Slot(4, "supply", "medicinal_herbs", 1), Slot(5, "gold", "", 1750)]
+    got = plan_surplus_discard(pack, {"food": 12, "medicinal_herbs": 1})
+    # antivenom: 2 held, keep 1 (trigger) -> a stack of 2 is not all surplus;
+    # bandage: keep 1 -> nothing; food and herbs reserved; torch never.
+    assert got is None
+    pack.append(Slot(6, "supply", "antivenom", 1))
+    got = plan_surplus_discard(pack, {"food": 12, "medicinal_herbs": 1})
+    assert got is not None and got.id == "antivenom"
+    assert plan_surplus_discard(pack, {"food": 12, "medicinal_herbs": 1,
+                                       "antivenom": 3}) is None
+
+
+def test_a_full_pack_trades_away_its_cheapest_stack_of_value():
+    """`--full-pack swap` (2026-10-05): the live bridge sat paused on a full
+    pack all morning. A player drops the least valuable stack for the loot;
+    the bridge does the same, but only below a cap, since it cannot see what
+    the loot window holds."""
+    from bridge.inventory import Slot, plan_value_discard
+    pack = [Slot(0, "gold", "", 1750), Slot(1, "gold", "", 120),
+            Slot(2, "heirloom", "crest", 2), Slot(3, "gem", "citrine", 1),
+            Slot(4, "supply", "torch", 3)]
+    d = plan_value_discard(pack)
+    assert d is not None and d.slot == 1           # 120 gold, not the crests or the torch
+
+
+def test_nothing_cheap_enough_means_no_swap():
+    from bridge.inventory import Slot, plan_value_discard
+    pack = [Slot(0, "gold", "", 1750), Slot(1, "gem", "ruby", 2),
+            Slot(2, "supply", "torch", 8), Slot(3, "heirloom", "portrait", 1)]
+    assert plan_value_discard(pack) is None         # portrait is 300g-equivalent

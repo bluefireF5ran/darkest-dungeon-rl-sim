@@ -360,11 +360,21 @@ class Rollout:
             from tools.playbook_policy import PlaybookPolicy
             self.model = PlaybookPolicy(self.env)
         else:
+            # A `--fate-obs` checkpoint is three wider and plays behind the
+            # wrapper that feeds it the dice (env/fate_wrapper.py). Peek at the
+            # width BEFORE binding the env: SB3 refuses a mismatched one.
+            from env.fate_wrapper import wrap_for
+            probe = MaskablePPO.load(model_path, device="cpu")
+            got = getattr(probe.observation_space, "shape", (0,))[0]
+            wrapped = wrap_for(base, got)
+            if wrapped is not base:
+                self.env = ActionMasker(wrapped, mask_fn)
             self.model = MaskablePPO.load(model_path, env=self.env, device="cpu")
 
     def evaluate(self, party: Sequence[PartyMember], zone_id: str, tier: int,
                  num_combats: int, length_band: str = "medium",
-                 episodes: int = DEFAULT_EPISODES, seed: int = 0) -> RolloutResult:
+                 episodes: int = DEFAULT_EPISODES, seed: int = 0,
+                 enemy_groups=None) -> RolloutResult:
         """Run `party` through `num_combats` fights in `zone_id` at `tier`,
         `episodes` times, and report how it went.
 
@@ -377,6 +387,10 @@ class Rollout:
         whatever each happened to draw.
         """
         options = build_options(party)
+        # The REAL fights ahead, read from the map's `mash_index` (see
+        # `bridge/fights_ahead.py`), when the caller has them.
+        if enemy_groups:
+            options["enemy_group_script"] = [list(g) for g in enemy_groups]
         # Deliberately NOT keyed on the party: episode k must be the same
         # dungeon for every candidate, or the ranking measures the luck of the
         # draw as much as the party.

@@ -189,6 +189,9 @@ class LiveHero:
     selected_skills: list[str] = field(default_factory=list)
     camping_skills: list[str] = field(default_factory=list)
     trinkets: list[str] = field(default_factory=list)
+    #: `{equipment slot: trinket id}` -- the slot KEYS `trinkets` drops, which a
+    #: drag off the hero sheet needs (slot 1 can be filled with slot 0 empty).
+    trinket_slots: dict = field(default_factory=dict)
     quirks: list[str] = field(default_factory=list)
     buffs: list[LiveBuff] = field(default_factory=list)
 
@@ -441,6 +444,17 @@ def _child_names(node: Optional[Field], key: str) -> list[str]:
     return [c.name for c in (sub.children or [])] if sub is not None else []
 
 
+def _item_slots(node: Optional[Field], key: str) -> dict:
+    """`{slot: id}` of an inventory-style block keyed by slot number."""
+    sub = node.get(key) if node is not None else None
+    out = {}
+    for slot in (sub.children or []) if sub is not None else []:
+        item_id = _val(slot, "id")
+        if item_id and str(slot.name).isdigit():
+            out[int(slot.name)] = str(item_id)
+    return out
+
+
 def _item_ids(node: Optional[Field], key: str) -> list[str]:
     """Ids of an inventory-style block, where the KEYS are slot numbers.
 
@@ -684,6 +698,7 @@ def _read_hero(guid: int, rec: Field, thresholds: list[int]) -> LiveHero:
         selected_skills=_child_names(skills, "selected_combat_skills"),
         camping_skills=_child_names(skills, "selected_camping_skills"),
         trinkets=_item_ids(rec.get("trinkets"), "items"),
+        trinket_slots=_item_slots(rec.get("trinkets"), "items"),
         quirks=[c.name for c in ((rec.get("quirks").children or []) if rec.get("quirks") else [])],
         buffs=_read_buffs(actor),
     )

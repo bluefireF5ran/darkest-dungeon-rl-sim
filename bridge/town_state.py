@@ -75,6 +75,10 @@ class Quest:
     difficulty: int           # 1 / 3 / 5, and IS the mash tier
     length: int               # 1..4, see QUEST_LENGTH_TO_BAND
     gold_reward: int = 0
+    #: Trinket ids in the completion reward -- every boss quest pays a very
+    #: rare, and WHICH one decides whether it is worth the run (Fran,
+    #: 2026-10-01; data/trinket_tiers.worth_a_boss).
+    reward_trinkets: tuple = ()
 
     @property
     def is_generated(self) -> bool:
@@ -172,6 +176,49 @@ class Recruit:
 RECRUIT_LISTINGS = ("hero_recruit", "shard_hero_recruit")
 
 
+def read_districts(town_file: Path) -> dict:
+    """`{district: built}` for every district the save lists."""
+    out: dict = {}
+    try:
+        root = parse_file(town_file)
+    except Exception:                                  # noqa: BLE001
+        return out
+    dist = root.get("districts") if root is not None else None
+    blds = dist.get("buildings") if dist is not None else None
+    for b in (blds.children or []) if blds is not None else []:
+        out[str(b.name)] = bool(_val(b, "built") or False)
+    return out
+
+
+def read_activity_slots(town_file: Path) -> dict:
+    """`{(building, activity): [guid per slot]}` for every building activity."""
+    out: dict = {}
+    try:
+        root = parse_file(town_file)
+    except Exception:                                  # noqa: BLE001
+        return out
+    buildings = root.get("buildings") if root is not None else None
+    for bld in (buildings.children or []) if buildings is not None else []:
+        acts = bld.get("activities")
+        for act in (acts.children or []) if acts is not None else []:
+            slots = []
+            for slot in sorted((act.children or []),
+                               key=lambda c: int(c.name) if str(c.name).isdigit() else 99):
+                if str(slot.name).isdigit():
+                    guid = int(_val(slot, "hero") or 0)
+                    # **A RESIDENT holds a slot too.** `resident_occupied` is
+                    # -1 when free; live 2026-09-28 the Cloister's one unlocked
+                    # slot read `hero 0, resident_occupied 0` -- a resident
+                    # sat in it -- so every meditation was dragged onto a
+                    # taken slot and failed. -1 marks it taken with no hero.
+                    resident = _val(slot, "resident_occupied")
+                    if not guid and resident is not None and int(resident) >= 0:
+                        guid = -1
+                    slots.append(guid)
+            out[(str(bld.name), str(act.name))] = slots
+    return out
+
+
 def read_recruits(town_file: Path) -> list[Recruit]:
     """Who the stage coach is offering, in the save's own order.
 
@@ -227,7 +274,24 @@ class TownState:
     wallet: dict[str, int] = field(default_factory=dict)
     trinket_inventory: list[str] = field(default_factory=list)
     recruits: list[Recruit] = field(default_factory=list)
+    #: `{(building, activity): [hero guid per slot, 0 = empty]}` from
+    #: `persist.town.json`. Written the moment a treatment is confirmed,
+    #: unlike the hero's `roster.building_name`, which waits for the panel
+    #: to close (measured 2026-09-26).
+    activity_slots: dict = field(default_factory=dict)
+    #: `{district: built}` from `persist.town.json` -> `districts.buildings`
+    #: (the Crimson Court districts; `granary/built` is False until bought).
+    districts: dict = field(default_factory=dict)
     resolve_caps: list[int] = field(default_factory=lambda: list(FALLBACK_RESOLVE_CAPS))
+    #: Quests finished this campaign (the Sanitarium opens after 4). None =
+    #: not read, which the town layer takes as open.
+    quests_finished: Optional[int] = None
+    #: The highest dungeon level reached (the Survivalist opens at 2). None =
+    #: not read, taken as met.
+    highest_dungeon_level: Optional[int] = None
+    #: `{hero guid: quirk ids locked at the Sanitarium}`. A locked quirk is
+    #: never replaced by a new one, and a locked negative costs more to remove.
+    locked_quirks: dict = field(default_factory=dict)
 
     def resolve_cap(self, difficulty: int) -> int:
         """Highest resolve level allowed on a quest of this difficulty."""
@@ -262,11 +326,14 @@ def _read_quests(quest_file: Path) -> list[Quest]:
     for entry in (block.children or []) if block is not None else []:
         reward = entry.get("completion_reward")
         gold = 0
+        trinkets = []
         items = reward.get("items_definition") if reward is not None else None
         items = items.get("items") if items is not None else None
         for slot in (items.children or []) if items is not None else []:
             if _val(slot, "type") == "gold":
                 gold = int(_val(slot, "amount") or 0)
+            elif _val(slot, "type") == "trinket" and _val(slot, "id"):
+                trinkets.append(str(_val(slot, "id")))
         out.append(Quest(
             key=entry.name,
             quest_id=str(_val(entry, "id") or ""),
@@ -275,7 +342,24 @@ def _read_quests(quest_file: Path) -> list[Quest]:
             difficulty=int(_val(entry, "difficulty") or 0),
             length=int(_val(entry, "length") or 1),
             gold_reward=gold,
+            reward_trinkets=tuple(trinkets),
         ))
+    return out
+
+
+def read_trinket_cells(estate_file: Path) -> dict[int, str]:
+    """The estate's unequipped trinkets by SLOT KEY -- which is also the cell
+    the Trinket Inventory draws each in (`townlayout.trinket_cell`)."""
+    out: dict[int, str] = {}
+    if not Path(estate_file).exists():
+        return out
+    root = parse_file(Path(estate_file))
+    tblock = root.get("trinkets") if root is not None else None
+    tblock = tblock.get("items") if tblock is not None else None
+    for slot in (tblock.children or []) if tblock is not None else []:
+        tid = _val(slot, "id")
+        if tid and str(slot.name).isdigit():
+            out[int(slot.name)] = str(tid)
     return out
 
 
@@ -301,6 +385,10 @@ def _read_estate(estate_file: Path) -> tuple[dict[str, int], list[str]]:
     return wallet, trinkets
 
 
+#: `roster.status` for a hero who has died (0 free, 1 in the party).
+ROSTER_STATUS_DEAD = 3
+
+
 def _read_roster(roster_file: Path, thresholds: list[int]) -> list[RosterHero]:
     if not roster_file.exists():
         return []
@@ -312,12 +400,33 @@ def _read_roster(roster_file: Path, thresholds: list[int]) -> list[RosterHero]:
         if not isinstance(rec, Field):
             continue
         guid = int(entry.name)
+        # **A DEAD hero stays in the roster file.** `roster.status` 3 (with
+        # `current_hp` -1.0) is what the game writes for one; measured
+        # 2026-09-23 on eight heroes killed in raids, all still listed. The
+        # estate map does not draw them, so a plan that seated one could only
+        # ever come back "not found in the learned roster list" -- a whole
+        # night of embarks refused 2 of 4 for exactly that.
+        if int(_val(rec, "roster.status") or 0) == ROSTER_STATUS_DEAD:
+            continue
         out.append(RosterHero(
             hero=_read_hero(guid, rec, thresholds),
             building=str(_val(rec, "roster.building_name") or ""),
             in_party=int(_val(rec, "roster.status") or 0) == 1,
         ))
     return out
+
+
+def read_quests_finished(progression_file: Path) -> Optional[int]:
+    """`persist.progression.json`'s `total_quests_finished` -- the count the
+    buildings open on (the Guild and the Blacksmith after 3). None when the
+    file is missing or torn, which the town layer takes as open."""
+    try:
+        if not progression_file.exists():
+            return None
+        n = _val(parse_file(progression_file), "total_quests_finished")
+        return None if n is None else int(n)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
 
 
 def read_town_state(profile: str | Path | None = None,
@@ -329,8 +438,10 @@ def read_town_state(profile: str | Path | None = None,
                     game_dir: Path = GAME_DIR) -> TownState:
     """The Hamlet right now. Pass explicit files to read a captured snapshot
     instead of the live profile — same convention as `read_live_state`."""
+    progression = Path(estate_file).parent / "persist.progression.json" if estate_file else None
     if roster_file is None or quest_file is None or estate_file is None:
         prof = find_profile(str(profile) if profile else None)
+        progression = prof / "persist.progression.json"
         staged = _stage([prof / "persist.roster.json", prof / "persist.quest.json",
                          prof / "persist.estate.json", prof / "persist.town.json"])
         roster_file = roster_file or staged / "persist.roster.json"
@@ -351,7 +462,10 @@ def read_town_state(profile: str | Path | None = None,
         wallet=wallet,
         trinket_inventory=trinkets,
         recruits=read_recruits(Path(town_file)) if town_file else [],
+        activity_slots=read_activity_slots(Path(town_file)) if town_file else {},
+        districts=read_districts(Path(town_file)) if town_file else {},
         resolve_caps=load_resolve_caps(game_dir),
+        quests_finished=read_quests_finished(progression) if progression else None,
     )
 
 

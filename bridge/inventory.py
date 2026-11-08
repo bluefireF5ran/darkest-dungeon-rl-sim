@@ -498,6 +498,116 @@ def plan_discards(pack: list[Slot], want: int = 1,
     return plan
 
 
+#: Provisions the fight layer spends on a trigger (bleed, blight, horror,
+#: disease): one of each stays in the pack whatever the reserve says.
+TRIGGER_ITEMS = frozenset({"bandage", "antivenom", "holy_water", "laudanum",
+                           "medicinal_herbs"})
+#: A stack worth more than this (at shop price) is not traded for unseen
+#: loot. A declared convention: under a single curio's usual gold draw.
+SURPLUS_VALUE_CAP = 300
+
+
+def plan_surplus_discard(pack: list[Slot], reserve: dict,
+                         defs: Optional[dict] = None) -> Optional[Discard]:
+    """A provision stack the rest of the raid does not need, or None.
+
+    The loot in a window is not in the save, so it cannot be priced; what can
+    be priced is what the pack will never use. `reserve` is the raid layer's
+    own ledger (`provision_use.room_reserve`: every item earmarked for a curio
+    still ahead, and food for the hunger checks left). A stack is offered only
+    when ALL of it is beyond that reserve (plus one of each trigger item), it
+    is never a torch, shovel, key or firewood, and it is cheap at shop price.
+    The cheapest such stack goes. Measured 2026-09-27: 33 of 37 curios given
+    up on in one night came straight after the game's "no room" modal.
+    """
+    defs = defs if defs is not None else item_defs()
+    held: dict = {}
+    for s in pack:
+        name = s.id or ("food" if s.type == "provision" else "")
+        if name:
+            held[name] = held.get(name, 0) + int(s.amount)
+    best = None
+    for s in pack:
+        # SUPPLY only -- the same positive gate `ItemDef.is_dead_weight`
+        # keeps. Food is reserved by the hunger budget and never offered.
+        if s.type not in DISCARDABLE_TYPES:
+            continue
+        name = s.id or ("food" if s.type == "provision" else "")
+        if not name or name in NEVER_DISCARD_IDS:
+            continue
+        keep = int((reserve or {}).get(name, 0)) + (1 if name in TRIGGER_ITEMS else 0)
+        surplus = held.get(name, 0) - keep
+        if s.amount > surplus:
+            continue
+        d = defs.get(s.key)
+        value = int(s.amount) * int(getattr(d, "purchase", 0) or 0)
+        if value > SURPLUS_VALUE_CAP:
+            continue
+        if best is None or value < best[0]:
+            best = (value, s)
+    if best is None:
+        return None
+    value, s = best
+    return Discard(s.slot, s.label,
+                   f"beyond what the rest of the raid reserves ({value}g at "
+                   f"shop price), to make room for the loot",
+                   type=s.type, id=s.id, amount=s.amount)
+
+
+#: `--full-pack swap`: the most a slot may be worth (gold, gems at their sale
+#: value, heirlooms at `CREST_GOLD` per crest-equivalent) for it to be thrown
+#: away to make room for loot nobody can see yet. Under a single curio's usual
+#: gold draw, so a swap trades a small stack for an ordinary pickup and never a
+#: real one for the unknown. A declared convention.
+SWAP_VALUE_CAP = 250.0
+
+
+def slot_value(s: Slot, defs: dict) -> Optional[float]:
+    """One comparable number for a pack slot, or None for what is never
+    traded away (supplies -- see `plan_surplus_discard` -- trinkets, quest
+    items, anything unpriced)."""
+    if s.type == "gold":
+        return float(s.amount)
+    if s.type == "gem":
+        d = defs.get(s.key)
+        return float(s.amount) * float(getattr(d, "sell", 0) or 0) if d else None
+    if s.type == "heirloom":
+        from data.heirlooms import crest_values, load_rates    # noqa: PLC0415
+        from data.loot_loader import CREST_GOLD                # noqa: PLC0415
+        try:
+            per = crest_values(load_rates(str(GAME_DIR))).get(s.id)
+        except Exception:                                      # noqa: BLE001
+            per = None
+        return None if per is None else float(s.amount) * per * CREST_GOLD
+    return None
+
+
+def plan_value_discard(pack: list[Slot], defs: Optional[dict] = None,
+                       cap: float = SWAP_VALUE_CAP) -> Optional[Discard]:
+    """The cheapest slot of value, if it is worth at most `cap`.
+
+    What a player does with a full pack: drop the least valuable stack and
+    take the new loot. The bridge cannot see the loot window (it is not in
+    the save until picked up), so it only ever trades away what is cheaper
+    than an ordinary pickup -- a part-stack of gold, one crest, a citrine.
+    """
+    defs = defs if defs is not None else item_defs()
+    best = None
+    for s in pack:
+        v = slot_value(s, defs)
+        if v is None or v > cap:
+            continue
+        if best is None or v < best[0]:
+            best = (v, s)
+    if best is None:
+        return None
+    v, s = best
+    return Discard(slot=s.slot, label=s.label,
+                   why=f"the cheapest stack in a full pack ({v:.0f}g-equivalent, "
+                       f"under the {cap:.0f}g swap cap) - traded for the loot",
+                   type=s.type, id=s.id, amount=int(s.amount))
+
+
 def describe(pack: list[Slot], defs: Optional[dict] = None,
              slots_total: int = RAID_SLOTS) -> str:
     defs = defs if defs is not None else item_defs()

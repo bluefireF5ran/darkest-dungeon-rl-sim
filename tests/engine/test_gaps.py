@@ -1017,15 +1017,23 @@ def test_clear_corpses_removes_corpse_in_target_ranks():
     leper = store.heroes["leper"]
     brawler = store.enemies["cultist_brawler_A"]
     engine.reset(hero_defs=[leper], enemy_defs=[brawler, brawler])
-    engine.enemies[0].is_dead = True
-    engine.enemies[0].is_corpse = True
+    # PIN THE RANK. `enemies[0]` is a list index, not a position, and this
+    # test is about the position the effect targets. `reset()` resolves a
+    # surprise action before the board is readable, and once monster
+    # `.move` began to be applied (2026-09-19) `brawler_claw`'s `.move 0 1`
+    # advanced the actor and slid the other enemy off rank 1 -- so the
+    # corpse was no longer where the assertion assumed.
+    corpse = engine.enemies[0]
+    corpse.position = 0
+    corpse.is_dead = True
+    corpse.is_corpse = True
     before = len(engine.enemies)
 
     sk = next(s for s in leper.skills if s.id == "focus")
     lv4 = sk.levels[4]
     eff = store.effects["clear_corpses"]
     assert eff.is_clear_corpses is True
-    engine._resolve_effect(engine.enemies[0], engine.heroes[0], eff, lv4)
+    engine._resolve_effect(corpse, engine.heroes[0], eff, lv4)
 
     assert len(engine.enemies) == before - 1
     print("  PASS test_clear_corpses_removes_corpse_in_target_ranks")

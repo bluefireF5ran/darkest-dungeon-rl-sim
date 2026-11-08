@@ -49,8 +49,18 @@ store = get_store()
 
 #: What the CURRENT engine produces. Moving either number invalidates every
 #: checkpoint in `models/` and `archive/models/`.
-BASE_OBS_WIDTH = 1644
-SEQUENCE_OBS_WIDTH = 1652
+#:
+#: 1644 -> 1828 and 1652 -> 1836 on **2026-09-19**, when the skill payload
+#: went 45 -> 53: a corpse-clearing flag, then six more capability flags
+#: and a signed torch-change, batched so the width moves ONCE rather than
+#: invalidating every checkpoint twice. Each feature costs +23: 7 skill
+#: slots, 4 heroes x 3 capability pools, 4 enemy slots.
+#: **Every checkpoint trained before that date stops loading**, which is
+#: the loud break and was chosen deliberately over reusing a spare index --
+#: there was none, and a reuse would have kept the width matching while
+#: feeding the model a dimension whose weights saw only 0.0 in training.
+BASE_OBS_WIDTH = 1828
+SEQUENCE_OBS_WIDTH = 1836
 
 #: The monster types the shipped (mods-off) content defines. The last four
 #: arrived with the DLC monster-tree fix and are what widened the observation.

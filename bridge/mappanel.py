@@ -66,6 +66,8 @@ from bridge.screen import PANEL_X, PANEL_Y, LUMA
 # A drawn cell against the panel's near-black ground. The panel's mean
 # luminance is ~7; every real cell edge measured 40+.
 INK = 40.0
+# The fallback for a dim palette -- see `locate`.
+INK_DIM = 25.0
 # Below this a run is a stray glyph, not a cell. The smallest real tile
 # measured is 6 px across (`generic curio.png`, the most zoomed-out capture).
 MIN_RUN = 4
@@ -79,6 +81,8 @@ TOL_UNITS = 0.35
 # A fit has to explain most of what is on screen. Below this the boxes and the
 # save are describing different maps and the answer is "I do not know".
 MIN_EXPLAINED = 0.75
+#: The same gate for a fit whose origin the party token pins (see `fit`).
+MIN_EXPLAINED_ANCHORED = 0.5
 MIN_MATCHED = 3
 
 # A room's box is drawn several times the size of a corridor tile (measured
@@ -160,6 +164,24 @@ def _runs(profile: np.ndarray, threshold: float,
     return out
 
 
+#: Pixels kept between a click and its box's edge.
+CLICK_MARGIN_PX = 3
+#: How close to the panel's edge a box must reach to count as clipped by it.
+EDGE_PX = 4
+#: How far (map units) past the edge a prediction may sit and still be
+#: pulled onto a clipped cell -- half a room.
+CLIP_REACH_UNITS = 1.6
+
+
+#: Where the map GRID starts, below the panel's frame line. `screen.PANEL_Y`
+#: (y 510 at 720p) cuts the grid's top 19 px: measured 2026-09-28, frame line
+#: at y 487-489 and grid from 491, and a room drawn there (rooC, predicted
+#: y 497) was never seen, so the raid stalled in rooH until the loop gave up.
+#: Used ONLY by the clipped-cell fallback: widening the fit's own region put a
+#: wrong scale on four map fixtures.
+MAP_GRID_TOP = 492.0 / 720
+
+
 def panel_rect(width: int, height: int) -> tuple[int, int, int, int]:
     """The panel in pixels for a frame this size. `(x0, x1, y0, y1)`."""
     return (int(PANEL_X[0] * width), int(PANEL_X[1] * width),
@@ -218,7 +240,8 @@ def _without_party_token(img: np.ndarray) -> np.ndarray:
     return out
 
 
-def find_boxes(img: np.ndarray) -> list[Box]:
+def find_boxes(img: np.ndarray, ink: float = INK,
+               top: Optional[float] = None) -> list[Box]:
     """The drawn cells in the map panel.
 
     Column runs, then row runs *within* each column run, then column runs again
@@ -237,17 +260,19 @@ def find_boxes(img: np.ndarray) -> list[Box]:
         return []
     height, width = img.shape[:2]
     x0, x1, y0, y1 = panel_rect(width, height)
+    if top is not None:
+        y0 = int(top * height)
     if x1 <= x0 or y1 <= y0:
         return []
     lum = np.asarray(img, dtype=np.float64)[y0:y1, x0:x1] @ LUMA
 
     out: list[Box] = []
-    for a, b in _runs(lum.max(axis=0), INK):
+    for a, b in _runs(lum.max(axis=0), ink):
         column = lum[:, a:b + 1]
-        for c, d in _runs(column.max(axis=1), INK):
+        for c, d in _runs(column.max(axis=1), ink):
             band = lum[c:d + 1, a:b + 1]
-            for e, f in _runs(band.max(axis=0), INK) or [(0, b - a)]:
-                out.extend(_split(lum, a + e, a + f, c, d, x0, y0))
+            for e, f in _runs(band.max(axis=0), ink) or [(0, b - a)]:
+                out.extend(_split(lum, a + e, a + f, c, d, x0, y0, ink=ink))
     return out
 
 
@@ -259,7 +284,7 @@ MAX_SPLIT_PASSES = 6
 
 
 def _split(lum: np.ndarray, a: int, b: int, c: int, d: int,
-           x0: int, y0: int) -> list[Box]:
+           x0: int, y0: int, ink: float = INK) -> list[Box]:
     """Keep alternating x and y runs inside a region until it stops splitting.
 
     THE THREE FIXED PASSES ABOVE ARE NOT ENOUGH AT LOW ZOOM, and this is the
@@ -297,10 +322,10 @@ def _split(lum: np.ndarray, a: int, b: int, c: int, d: int,
         for ra, rb, rc, rd in regions:
             patch = lum[rc:rd + 1, ra:rb + 1]
             if axis == 0:
-                runs = _runs(patch.max(axis=0), INK) or [(0, rb - ra)]
+                runs = _runs(patch.max(axis=0), ink) or [(0, rb - ra)]
                 pieces = [(ra + s, ra + e, rc, rd) for s, e in runs]
             else:
-                runs = _runs(patch.max(axis=1), INK) or [(0, rd - rc)]
+                runs = _runs(patch.max(axis=1), ink) or [(0, rd - rc)]
                 pieces = [(ra, rb, rc + s, rc + e) for s, e in runs]
             if len(pieces) > 1 or pieces[0] != (ra, rb, rc, rd):
                 moved = True
@@ -483,7 +508,8 @@ def _agreement(boxes: Sequence[Box], tile_kinds: dict, scale: float,
 
 
 def _score(boxes: Sequence[Box], tiles: Sequence[tuple[float, float]],
-           scale: float, tile_kinds: Optional[dict] = None) -> Optional[MapFit]:
+           scale: float, tile_kinds: Optional[dict] = None,
+           anchor=None) -> Optional[MapFit]:
     """Best translation for one scale, by voting.
 
     Every (box, tile) pair implies one origin. The true origin is implied by
@@ -515,6 +541,12 @@ def _score(boxes: Sequence[Box], tiles: Sequence[tuple[float, float]],
     picked = votes[best_key]
     ox = float(np.mean([p[0] for p in picked]))
     oy = float(np.mean([p[1] for p in picked]))
+    if anchor is not None:
+        # The party token IS the party's room: its pixel and the room's map
+        # position fix the origin for this scale, and the vote -- which with
+        # three drawn cells can pick another part of the map -- is not asked.
+        (mx, my), (px, py) = anchor
+        ox, oy = px - scale * mx, py - scale * my
 
     # Re-derive the match from the agreed origin rather than trusting the bin:
     # a box on a bin boundary votes in one bucket and matches from another.
@@ -570,7 +602,8 @@ def _rank(got: MapFit) -> tuple:
 
 
 def _refine(boxes: Sequence[Box], tiles: Sequence[tuple[float, float]],
-            best: MapFit, tile_kinds: Optional[dict] = None) -> MapFit:
+            best: MapFit, tile_kinds: Optional[dict] = None,
+            anchor=None) -> MapFit:
     """Walk a fine grid around the winning scale and keep the best.
 
     Same ranking as `fit` uses -- more boxes matched, then a smaller residual
@@ -598,7 +631,7 @@ def _refine(boxes: Sequence[Box], tiles: Sequence[tuple[float, float]],
         scale = best.scale * (1.0 + k * (REFINE_SPAN / REFINE_STEPS))
         if scale <= 0:
             continue
-        got = _score(boxes, tiles, scale, tile_kinds)
+        got = _score(boxes, tiles, scale, tile_kinds, anchor)
         if got is None:
             continue
         if (got.matched, got.explained) <= (best.matched, best.explained):
@@ -610,7 +643,8 @@ def _refine(boxes: Sequence[Box], tiles: Sequence[tuple[float, float]],
 
 def fit(boxes: Sequence[Box],
         tiles: Sequence[tuple[float, float]],
-        tile_kinds: Optional[dict] = None) -> Optional[MapFit]:
+        tile_kinds: Optional[dict] = None,
+        anchor=None, scale_hint: Optional[float] = None) -> Optional[MapFit]:
     """Recover map-units -> pixels, or None when the frame does not support one.
 
     None is a normal answer. The panel may be mid-pan, half the map may be
@@ -625,8 +659,15 @@ def fit(boxes: Sequence[Box],
     if len(boxes) < MIN_MATCHED or not tiles:
         return None
     best: Optional[MapFit] = None
-    for scale in _candidate_scales(boxes, tiles):
-        got = _score(boxes, tiles, scale, tile_kinds)
+    # With the party's own room box measured, the scale is KNOWN to within the
+    # drawing's slack, and the pairwise candidates -- which on a sparse frame
+    # offered 6.8 px/unit and let merged corridor slabs outvote the truth --
+    # are not needed.
+    scales = ([scale_hint * (1.0 + k * (REFINE_SPAN / REFINE_STEPS))
+               for k in range(-REFINE_STEPS, REFINE_STEPS + 1)]
+              if scale_hint else _candidate_scales(boxes, tiles))
+    for scale in scales:
+        got = _score(boxes, tiles, scale, tile_kinds, anchor)
         if got is None:
             continue
         if best is None or _rank(got) > _rank(best):
@@ -636,10 +677,14 @@ def fit(boxes: Sequence[Box],
     # Refine BEFORE the acceptance gates, never after: the whole point is that
     # the vote winner can be a slightly-wrong scale that fails them while the
     # true one passes.
-    best = _refine(boxes, tiles, best, tile_kinds)
+    best = _refine(boxes, tiles, best, tile_kinds, anchor)
     if best.matched < MIN_MATCHED:
         return None
-    if best.explained < MIN_EXPLAINED:
+    # An ANCHORED fit has the party token pinning its origin, which is worth
+    # more than a vote share -- live 2026-09-25 a vertical corridor drawn as
+    # merged slabs held a correct, anchored fit at 5/7 under the 0.75 bar.
+    if best.explained < (MIN_EXPLAINED_ANCHORED if anchor is not None
+                         else MIN_EXPLAINED):
         return None
     if best.agreement < MIN_KIND_AGREEMENT:
         return None
@@ -685,7 +730,68 @@ def area_point(dungeon, area_id: str) -> Optional[tuple[float, float]]:
     return placed[len(placed) // 2].mappos
 
 
-def locate(img: np.ndarray, dungeon, area_id: str
+#: Token pixels needed before a centre is believed, and the cluster radius.
+TOKEN_MIN_PIXELS = 20
+#: The torch is ORANGE (green/red ~0.45-0.49 measured); a red room icon on
+#: the map is ~0.21 and was taken for the token on 2026-09-26, which made the
+#: party-on-token check refuse a CORRECT fit for three iterations.
+TOKEN_MIN_GREEN_RATIO = 0.35
+TOKEN_RADIUS = 14
+
+
+def party_token(img: np.ndarray) -> Optional[tuple[float, float]]:
+    """The party's torch token on the map, as client pixels, or None.
+
+    Searched INSIDE the panel only -- the torch meter above the scene is the
+    same orange -- and as the densest cluster rather than the mean, because
+    a room icon nearby carries a few orange pixels of its own (measured: the
+    plain mean sat 12 px left of the token). The same colour gates as
+    `_without_party_token`, which stays retracted as a box-detection change;
+    this only reads WHERE the token is."""
+    height, width = img.shape[:2]
+    x0, x1, y0, y1 = panel_rect(width, height)
+    a = np.asarray(img[y0:y1, x0:x1], dtype=np.float64) / 255.0
+    red, green, blue = a[..., 0], a[..., 1], a[..., 2]
+    top, bottom = a.max(2), a.min(2)
+    sat = np.where(top > 0, (top - bottom) / np.maximum(top, 1e-6), 0.0)
+    mask = ((red > TOKEN_MIN_RED) & (red > blue * TOKEN_RED_OVER_BLUE)
+            & (green < red * TOKEN_MAX_GREEN_RATIO) & (sat > TOKEN_MIN_SAT)
+            & (green > red * TOKEN_MIN_GREEN_RATIO))
+    ys, xs = np.nonzero(mask)
+    if len(xs) < TOKEN_MIN_PIXELS:
+        return None
+    grid, xe, ye = np.histogram2d(
+        xs, ys, bins=[max(1, (x1 - x0) // TOKEN_RADIUS),
+                      max(1, (y1 - y0) // TOKEN_RADIUS)])
+    # Every orange CLUSTER, then the one nearest where the map puts the party.
+    # The densest was the first rule and it lost twice on 2026-09-26: a red
+    # fight-room icon (gated out by colour) and a treasure room's gold icon,
+    # which is orange enough to pass. The panel opens CENTRED on the party --
+    # (855, 587) at 1280x720 in every frame banked -- so position decides.
+    candidates = []
+    taken = np.zeros(len(xs), dtype=bool)
+    for flat in np.argsort(grid, axis=None)[::-1]:
+        i, j = np.unravel_index(int(flat), grid.shape)
+        if grid[i, j] < TOKEN_MIN_PIXELS / 4:
+            break
+        cx, cy = (xe[i] + xe[i + 1]) / 2.0, (ye[j] + ye[j + 1]) / 2.0
+        near = ((np.abs(xs - cx) <= TOKEN_RADIUS * 1.5)
+                & (np.abs(ys - cy) <= TOKEN_RADIUS * 1.5) & ~taken)
+        if int(near.sum()) >= TOKEN_MIN_PIXELS:
+            candidates.append((float(xs[near].mean() + x0),
+                               float(ys[near].mean() + y0)))
+            taken |= near
+    if not candidates:
+        return None
+    hx, hy = TOKEN_HOME[0] * width, TOKEN_HOME[1] * height
+    return min(candidates, key=lambda c: (c[0] - hx) ** 2 + (c[1] - hy) ** 2)
+
+
+#: Where the map panel draws the party when it opens, as a client fraction.
+TOKEN_HOME = (855.0 / 1280, 587.0 / 720)
+
+
+def locate(img: np.ndarray, dungeon, area_id: str, here: str = ""
            ) -> tuple[Optional[tuple[float, float]], str]:
     """Where to click to travel to `area_id`, as a client-rect FRACTION.
 
@@ -709,7 +815,49 @@ def locate(img: np.ndarray, dungeon, area_id: str
     boxes = find_boxes(img)
     if not boxes:
         return None, "nothing is drawn in the map panel"
-    got = fit(boxes, tiles_of(dungeon), kinds_of(dungeon))
+    # **ANCHORED ON THE PARTY TOKEN when the party is in a room** (live
+    # 2026-09-25): with three cells drawn around the entrance, the vote put the
+    # whole map 14 x 7 units off -- rooL, the party's own room, predicted at
+    # (1003, 660) with the token at (856, 587) -- and the party sat in its
+    # first room for two iterations. The save says which room the party is
+    # in and the token is drawn on it, so that pair pins the origin.
+    anchor = None
+    home = dungeon.areas.get(here) if here else None
+    if home is not None and home.is_room:
+        pos = area_point(dungeon, here)
+        tok = party_token(img)
+        if pos is not None and tok is not None:
+            anchor = (pos, tok)
+    got = None
+    if anchor is not None:
+        from bridge import mapicons                      # noqa: PLC0415
+        tx, ty = anchor[1]
+        under = [bx for bx in boxes if bx.contains(tx, ty)]
+        hint = (max(max(under, key=lambda bx: max(bx.size)).size)
+                / mapicons.ROOM_UNITS) if under else None
+        got = fit(boxes, tiles_of(dungeon), kinds_of(dungeon), anchor=anchor,
+                  scale_hint=hint)
+    if got is None:
+        got = fit(boxes, tiles_of(dungeon), kinds_of(dungeon))
+        if got is not None and anchor is not None:
+            hx, hy = got.point(anchor[0])
+            if max(abs(hx - anchor[1][0]),
+                   abs(hy - anchor[1][1])) > TOL_UNITS * got.scale * 2:
+                return None, (f"the map fit puts {here} at {hx:.0f},{hy:.0f} "
+                              f"but the party token is at "
+                              f"{anchor[1][0]:.0f},{anchor[1][1]:.0f} - not "
+                              f"clicking a wrong room")
+    if got is None:
+        # **A dim palette draws its cells under INK.** Measured 2026-09-23
+        # on a Cove map: fill at 20-40 luminance with only broken edges
+        # above 40, so rooms came out half-height and a corridor split into
+        # 4 px slabs -- 10 boxes, no fit, a raid stalled in its room. At 25
+        # the same frame fits 15/15. Tried only after the normal threshold
+        # fails, so every map that already worked is left exactly as it was.
+        dim = find_boxes(img, ink=INK_DIM)
+        dim_fit = fit(dim, tiles_of(dungeon), kinds_of(dungeon)) if dim else None
+        if dim_fit is not None:
+            boxes, got = dim, dim_fit
     if got is None:
         return None, f"could not fit the map to the {len(boxes)} cells drawn"
     px, py = got.point(target)
@@ -718,11 +866,57 @@ def locate(img: np.ndarray, dungeon, area_id: str
     # in for the room, and the click would land on a label.
     hits = [b for b in _cells_for(boxes, got.scale) if b.contains(px, py)]
     if not hits:
+        # **A cell CLIPPED by the panel's edge is still the cell.** Live
+        # 2026-09-27 (Cove): rooI predicted at y 696 with the panel ending at
+        # 695 -- its centre off the panel, the top of it drawn -- so no box
+        # could contain the prediction, "rooI is not drawn" on every poll,
+        # and the raid stalled. Panning is not an option -- a dragged view
+        # loses the map (Fran). So the prediction is pulled inside the panel
+        # (never further than half a cell), and a box there that touches the
+        # edge is taken and clicked in the middle of what is visible.
+        height, width = img.shape[:2]
+        x0, x1, y0, y1 = panel_rect(width, height)
+        floor = MIN_CELL_UNITS * got.scale
+        reach = got.scale * CLIP_REACH_UNITS
+        qx = min(max(px, x0 + EDGE_PX), x1 - EDGE_PX)
+        qy = min(max(py, y0 + EDGE_PX), y1 - EDGE_PX)
+        near = abs(qx - px) <= reach and abs(qy - py) <= reach
+        clipped = [b for b in boxes if near and b.contains(qx, qy)
+                   and max(b.size) >= floor
+                   and (b.y1 >= y1 - EDGE_PX or b.y0 <= y0 + EDGE_PX
+                        or b.x1 >= x1 - EDGE_PX or b.x0 <= x0 + EDGE_PX)]
+        if not clipped and y0 - reach <= py < y0:
+            # Above the panel's top the grid is still drawn for 19 px; look
+            # there for a box under the prediction's x.
+            # Nearest by x within reach, not "contains": a room's icon splits
+            # its box in two and the prediction can sit in the 2 px between
+            # (live rooC: boxes 866-873 and 876-885, predicted x 875).
+            top_strip = [b for b in find_boxes(img, top=MAP_GRID_TOP)
+                         if b.y0 < y0 and abs(b.centre[0] - px) <= reach
+                         and abs(b.centre[1] - py) <= reach
+                         and max(b.size) >= floor]
+            if top_strip:
+                box = min(top_strip, key=lambda b: abs(b.centre[0] - px))
+                cx, cy = box.centre
+                return ((cx / width, cy / height),
+                        got.line() + " (clipped by the top edge)")
+        if clipped:
+            box = max(clipped, key=lambda b: b.size[0] * b.size[1])
+            cx, cy = box.centre
+            return (cx / width, cy / height), got.line() + " (clipped by the edge)"
+    if not hits:
         return None, (f"{area_id} is not drawn on the map "
                       f"({got.line()}; predicted {px:.0f},{py:.0f})")
     box = min(hits, key=lambda b: abs(b.centre[0] - px) + abs(b.centre[1] - py))
     height, width = img.shape[:2]
-    cx, cy = box.centre
+    # **The prediction, kept inside the box -- not the box's centre.** A room
+    # and the corridor running into it can come out of `find_boxes` as ONE
+    # tall box, whose centre is on the corridor (live 2026-09-28: rooI and
+    # coFI both resolved to (850, 638), the room drawn at ~(857, 657), and the
+    # raid stalled in rooF). The fit's own point is good to a few pixels.
+    m = CLICK_MARGIN_PX
+    cx = min(max(px, box.x0 + m), box.x1 - m) if box.x1 - box.x0 > 2 * m else box.centre[0]
+    cy = min(max(py, box.y0 + m), box.y1 - m) if box.y1 - box.y0 > 2 * m else box.centre[1]
     return (cx / width, cy / height), got.line()
 
 

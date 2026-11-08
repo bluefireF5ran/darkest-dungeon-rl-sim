@@ -82,6 +82,19 @@ class DarkestParser:
         # (e.g. .effect "A" "B") without swallowing the trailing separator
         # whitespace the shared lookahead needs. Unquoted alternative also
         # accepts '@'/'~' prefixes used in position notation (@1234, ~123),
+        # '?' IS IN THE CLASS TOO, and leaving it out cost a vanilla skill.
+        # `decode_position_notation` was taught about `?1234` when the modded
+        # corpus turned up 88 of them -- but the value never reached it,
+        # because the character class here has no '?', the value alternative
+        # failed to match, and (per the note further down) an unmatchable
+        # value drops the WHOLE key. `.target` therefore vanished from the
+        # record entirely rather than arriving malformed.
+        #
+        # It is not only a mod shape: `.target ?1234` is shipped on the
+        # Arbalest's **blindfire** (all five levels, a base-game hero) and the
+        # Musketeer's **sidearm**. Both read `target=[]`, so a rank-4 shot the
+        # real game aims at any enemy rank could not be aimed at all.
+        # `tests/data/test_darkest_parser.py` pins it.
         # and bare word characters (a-zA-Z_) for unquoted identifiers like
         # `.id cultist_brawler_A`, `.deathfx death_medium`, and capitalized
         # `True`/`False` (e.g. `.accelerate_stall_penalty False`) — verified
@@ -119,7 +132,7 @@ class DarkestParser:
             r'\.([a-zA-Z_]+)'
             r'(?:\s+'
             r'(?:("(?:[^"\\]|\\.)*"(?:\s+"(?:[^"\\]|\\.)*")*)'
-            r'|((?!\.[a-zA-Z_])[@~0-9a-zA-Z_.,%\-+\s]+?))'
+            r'|((?!\.[a-zA-Z_])[@~?0-9a-zA-Z_.,%\-+\s]+?))'
             r')?'
             r'(?=\s*\.[a-zA-Z_]|$)',
             body
@@ -167,8 +180,19 @@ class DarkestParser:
         heal/buff skills); '~' marks AoE (see is_aoe detection in hero_loader).
         Neither changes which ranks are listed, so both are stripped before
         decoding digits.
+
+        Shipped data is always `[@~]*<digits>`, but a MOD is not obliged to
+        be: the Workshop corpus carries `?1234` (88 times, an unknown
+        modifier prefix) and `1234.is_user_selected_targets` (79 times, a
+        missing space that glued the next key onto the value). Both used to
+        reach `int(c)` and raise, and because this runs inside the shared
+        skill build one such file took down the load for EVERY modded class.
+
+        So only DIGITS are decoded and anything else is dropped. That is the
+        right answer for all three shapes rather than merely a quiet one:
+        `?1234` means ranks 1-4, and so does the glued form. Shipped data is
+        unaffected, since it has nothing to drop.
         """
         if not pos_str:
             return []
-        digits = pos_str.lstrip("@~")
-        return [int(c) for c in digits]
+        return [int(c) for c in str(pos_str) if c.isdigit()]

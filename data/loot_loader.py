@@ -520,6 +520,8 @@ def gold_multiplier(torch: float, game_dir: str = str(GAME_DIR)) -> float:
 class WalkCosts:
     """What one tile and one corridor re-entry cost at a given torch level."""
     light_loss: float = 1.0
+    #: A tile already walked. See `walk_costs`.
+    revisit_light_loss: float = 1.0
     return_battle: float = 0.0
     return_hunger: float = 0.0
     return_trap: float = 0.0
@@ -577,8 +579,17 @@ def walk_costs(torch: float, game_dir: str = str(GAME_DIR)) -> WalkCosts:
             data.get("base_dark_mod_table") or {}, torch)
 
     stress = raw.get("hallway_stress") or {}
+    # **`clear` / `dim` / `dark` are TILE states, not light levels.**
+    # Corrected 2026-09-23 from the live logs: walking a NEW corridor tile at
+    # torch 100 costs 6 (100 -> 94 recurs across a dozen clean moves), and a
+    # re-walked corridor costs about 1-2. The old reading (1 per tile while
+    # radiant, 6 once dim) under-priced every planned walk in the light
+    # six-fold. A new tile burns the `dim` rate at any light; a cleared one
+    # burns `clear`.
+    del torch  # the light level does not change the per-tile cost
     return WalkCosts(
-        light_loss=clear if torch > 75.0 else dim,
+        light_loss=dim,
+        revisit_light_loss=clear,
         return_battle=chances.get("ac_battle", 0.0),
         return_hunger=chances.get("ac_hunger", 0.0),
         return_trap=chances.get("ac_trap", 0.0),

@@ -184,14 +184,22 @@ def read_rank_counts(upgrades_file: str | Path) -> dict[tuple[int, int], int]:
     Returns `{}` for a missing or unreadable file. A caller cannot distinguish
     that from "nothing bought", and does not need to: being wrong costs an
     offer the game refuses, which is a wasted click and not a wrong one.
+
+    **A fresh campaign's file is plain JSON, not DSON**, and nests the
+    purchases one level deeper (`{"version", "data": {"purchases"}}`):
+    `scripts/starting_save/persist.upgrades.json` is copied in byte-for-byte
+    and only becomes DSON at the game's first save. Reading it with
+    `parse_bytes` raised on the magic, the `except` turned that into `{}`, and
+    a new campaign's 28 starting skills read as none bought (2026-10-10).
     """
     try:
-        from data.dson import parse_bytes
-        raw = parse_bytes(Path(upgrades_file).read_bytes())
+        from data.dson import parse_file
+        raw = parse_file(upgrades_file)
     except Exception:                                     # noqa: BLE001
         return {}
     tree = raw.to_dict() if hasattr(raw, "to_dict") else raw
-    entries = (tree or {}).get("purchases") or {}
+    tree = tree or {}
+    entries = tree.get("purchases") or (tree.get("data") or {}).get("purchases") or {}
     counts: dict[tuple[int, int], int] = {}
     for entry in (entries.values() if isinstance(entries, dict) else entries):
         if not isinstance(entry, dict) or "tree_id" not in entry:
@@ -320,6 +328,82 @@ def crest_values(rates) -> dict[str, float]:
         if rate.to_type == "crest" and rate.from_amount:
             values[rate.from_type] = rate.to_amount / rate.from_amount
     return values
+
+
+@lru_cache(maxsize=4)
+def heirloom_bias(game_dir: str) -> dict[str, dict[str, int]]:
+    """Which heirloom each region actually drops, from `loot/loot.json`.
+
+    `solve_exchange` answers "I am short three deeds, what do I trade?"; this
+    answers the question before it -- **where do I go to earn them?** The two
+    together turn an upgrade shortfall into a region to raid.
+
+    Returns `{dungeon: {heirloom: weight}}` from the shipped drop tables,
+    which carry a `dungeon` field and the per-entry `chances` the game rolls
+    against. Identical across all three difficulty tiers (1/3/5), so the tier
+    is collapsed; the weights below are the whole table.
+
+        dungeon    bust  deed  portrait  crest
+        cove          1     1         1      3
+        crypts        3     1         1      3
+        warrens       1     1         3      3
+        weald         1     3         1      3
+
+    **The community claim is right for three regions and misleading for the
+    fourth.** Ruins->busts, Weald->deeds and Warrens->portraits are real: each
+    elevates exactly one heirloom to 3 against a baseline of 1. But *crest is
+    3 in every region*, so "Cove -> crests" names the universal baseline
+    rather than a Cove speciality -- **the Cove is the one region that
+    elevates nothing**, and if crests are what is short then the region does
+    not matter. A router that believed the guide would send a party to the
+    Cove for crests it would have got anywhere.
+
+    An empty dict when the tables cannot be read, so a caller degrades to
+    "region does not matter" rather than raising.
+    """
+    path = Path(game_dir) / "loot" / "loot.json"
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            raw = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    out: dict[str, dict[str, int]] = {}
+    for table in raw.get("loot_tables") or ():
+        dungeon = str(table.get("dungeon") or "")
+        if not dungeon:
+            continue
+        for entry in table.get("entries") or ():
+            data = entry.get("data") or {}
+            if str(data.get("type") or "") != "heirloom":
+                continue
+            item = str(data.get("id") or "")
+            if item not in HEIRLOOMS:
+                continue
+            chances = int(entry.get("chances") or 0)
+            # max, not sum: the same (dungeon, heirloom) row repeats once per
+            # difficulty tier with an IDENTICAL `chances`, and summing them
+            # would invent a tier effect the weights do not have. The `amount`
+            # on those rows is what scales with the tier -- bust 2/3/4 and
+            # crest 4/6/8 at tiers 1/3/5 -- so this function answers WHICH
+            # region, and the tier answers how much per drop.
+            bucket = out.setdefault(dungeon, {})
+            bucket[item] = max(bucket.get(item, 0), chances)
+    return out
+
+
+def regions_for(heirloom: str, game_dir: str) -> list[str]:
+    """The regions that drop `heirloom` most, best first, then alphabetical.
+
+    Every region when nothing is elevated -- which is the honest answer for
+    crests, and the reason this returns a list rather than one region.
+    """
+    bias = heirloom_bias(game_dir)
+    if not bias:
+        return []
+    ranked = sorted(bias.items(),
+                    key=lambda kv: (-kv[1].get(heirloom, 0), kv[0]))
+    best = ranked[0][1].get(heirloom, 0)
+    return [d for d, w in ranked if w.get(heirloom, 0) == best]
 
 
 def _spend_value(trade: Trade, values: dict[str, float]) -> float:

@@ -539,6 +539,120 @@ def test_a_free_slot_can_be_claimed_and_then_deleted(tmp_path):
     assert (remote / "profile_8").exists()
 
 
+def test_the_slot_the_GAME_made_is_the_one_that_gets_owned(tmp_path):
+    """**DD picks the slot, and the boot's guess was wrong.**
+
+    The save list is COMPACT -- one row per campaign with the holes closed up
+    -- so "the row for slot N" is not a thing. Measured live 2026-09-21: the
+    boot asked for slot 2 on a disk holding 0, 1, 8 and 9, and the game
+    created **profile_7**. The loop owned a slot that was never made, its
+    teardown deleted nothing, and the real campaign became an orphan no later
+    run could claim or remove. That is how both of this machine's orphans
+    were made.
+    """
+    from bridge import reset                                  # noqa: PLC0415
+    root, remote = _fake_saves(tmp_path, [0, 1, 8, 9])
+    before = reset.slots_on_disk(save_root=root)
+    assert before == frozenset({0, 1, 8, 9})
+
+    # The game creates whatever it likes -- here, 7, not the 2 we asked for.
+    made = remote / "profile_7"
+    made.mkdir()
+    (made / "persist.game.json").write_text("{}")
+
+    owned = reset.claim_created(before, save_root=root,
+                                journal=tmp_path / "claims.json")
+    assert owned.slot == 7 and owned.path == made
+    assert reset.delete_owned(owned, screen="title", save_root=root,
+                              recheck=0) is True
+    assert not made.exists()
+    for keep in (0, 1, 8, 9):
+        assert (remote / f"profile_{keep}").exists()
+
+
+def test_claiming_what_was_created_keeps_the_SAME_safety_argument(tmp_path):
+    """Nothing in `before` can ever come back as an `OwnedSlot`.
+
+    `claim_slot` enforces that by refusing an existing path; this enforces it
+    by construction, against a snapshot taken before the campaign was made.
+    The two failure shapes both refuse rather than guess: nothing new means
+    no campaign was created, and more than one new means the diff cannot say
+    which is ours -- and guessing is how the wrong save gets deleted.
+    """
+    from bridge import reset                                  # noqa: PLC0415
+    root, remote = _fake_saves(tmp_path, [0, 8])
+    before = reset.slots_on_disk(save_root=root)
+    journal = tmp_path / "claims.json"
+
+    # Nothing created.
+    with pytest.raises(reset.ResetRefused):
+        reset.claim_created(before, save_root=root, journal=journal)
+
+    # Two created: ambiguous, so refuse.
+    for slot in (1, 2):
+        d = remote / f"profile_{slot}"
+        d.mkdir()
+        (d / "persist.game.json").write_text("{}")
+    with pytest.raises(reset.ResetRefused):
+        reset.claim_created(before, save_root=root, journal=journal)
+
+    # And a pre-existing slot is never in the diff, however it is asked for.
+    after = reset.slots_on_disk(save_root=root)
+    assert 0 not in (after - before) and 8 not in (after - before)
+
+
+def test_a_KILLED_iterations_campaign_can_be_swept_later(tmp_path):
+    """A run stopped mid-raid never reaches its teardown, so the campaign
+    survives with an unreleased claim against it -- and the next run, which
+    snapshots before booting, correctly sees it as pre-existing and refuses
+    to touch it. Two of those accumulated on this machine in one day and had
+    to be removed by hand.
+
+    `orphans` reads the same journal everything else here trusts, so the
+    guarantee is unchanged: a campaign a human made has no entry and can
+    never come back from this.
+    """
+    from bridge import reset                                  # noqa: PLC0415
+    root, remote = _fake_saves(tmp_path, [0, 8])
+    journal = tmp_path / "claims.json"
+    before = reset.slots_on_disk(save_root=root)
+
+    made = remote / "profile_3"
+    made.mkdir()
+    (made / "persist.game.json").write_text("{}")
+    owned = reset.claim_created(before, save_root=root, journal=journal)
+    assert owned.slot == 3
+
+    # ...and the process dies here, without releasing.
+    found = reset.orphans(save_root=root, journal=journal)
+    assert [o.path for o in found] == [made]
+
+    assert reset.delete_owned(found[0], screen="title", save_root=root,
+                              recheck=0, journal=journal) is True
+    assert not made.exists()
+    assert reset.orphans(save_root=root, journal=journal) == []
+
+
+def test_a_save_NOBODY_claimed_is_never_an_orphan(tmp_path):
+    """The whole safety argument, from the other side: the sweep is driven by
+    the journal, not by what is on disk. A campaign with no entry -- anything
+    a human made -- cannot be produced by `orphans` at all, so it can never
+    reach `delete_owned`."""
+    from bridge import reset                                  # noqa: PLC0415
+    root, remote = _fake_saves(tmp_path, [0, 1, 8])
+    journal = tmp_path / "claims.json"
+    assert reset.orphans(save_root=root, journal=journal) == []
+
+    # An expired claim does not resurrect one either.
+    import json, time
+    made = remote / "profile_4"
+    made.mkdir()
+    journal.write_text(json.dumps([{
+        "slot": 4, "path": str(made), "released": False,
+        "claimed_at": time.time() - (reset.ADOPT_MAX_AGE + 60)}]))
+    assert reset.orphans(save_root=root, journal=journal) == []
+
+
 def test_the_delete_refuses_anywhere_but_the_title_screen(tmp_path):
     """The campaign has to be UNLOADED. Deleting a profile the game still has
     open is how a half-written save survives the removal -- and every screen

@@ -12,7 +12,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 
-def _night(monkeypatch, *, resume, slot=1, live="profile_8", exists=True):
+def _night(monkeypatch, *, resume, slot=1, live="profile_8", exists=True,
+           play_profile_0=False):
     """An `Overnight` with nothing constructed and a fake live profile.
 
     `__init__` makes directories and stamps a run id, and `_profile` reads
@@ -25,6 +26,7 @@ def _night(monkeypatch, *, resume, slot=1, live="profile_8", exists=True):
     n = object.__new__(overnight.Overnight)
     n.slot = slot
     n.resume = resume
+    n.play_profile_0 = play_profile_0
     n.say = said.append
     n._resumed_profile = None
 
@@ -76,6 +78,28 @@ def test_a_resumed_night_REFUSES_profile_0(monkeypatch):
     assert any("profile_0" in s and "never drives it" in s for s in said), said
 
 
+def test_the_profile_0_refusal_is_LIFTED_by_the_flag(monkeypatch):
+    """**Fran handed profile_0 over on 2026-09-21** to be continued rather
+    than restarted: *"I've provided a save on the first possible profile ...
+    lets stop restarting the save as the tutorial and the first mission on
+    each zone is scripted so we wont have the versatility on our model by
+    repeating those"*.
+
+    It stays an OPT-IN rather than a deleted rule, so the guarantee still
+    holds for every run that was not told to do this.
+    """
+    n, said = _night(monkeypatch, resume=True, live="profile_0",
+                     play_profile_0=True)
+    assert n._profile().name == "profile_0"
+    assert not any("never drives it" in s for s in said), said
+
+
+def test_the_flag_does_nothing_for_any_OTHER_profile(monkeypatch):
+    """It lifts one specific refusal; it is not a mode."""
+    n, _said = _night(monkeypatch, resume=True, live="profile_8",
+                      play_profile_0=True)
+    assert n._profile().name == "profile_8"
+
 def test_a_CLAIMED_night_pointed_at_slot_0_is_not_this_guard(monkeypatch):
     """Deliberately narrow: the refusal is about what resume INFERS, not
     about what an operator asked for. `--slot 0` is refused far upstream by
@@ -110,8 +134,109 @@ def test_a_slot_directory_that_does_not_exist_is_None(monkeypatch):
     assert n._profile() is None
 
 
+# -- the full pack, and the escape that could not be reached ----------------
+
+def test_the_full_pack_policy_REACHES_run_py(monkeypatch, tmp_path):
+    """**`run.py` has had `--full-pack abandon` all along and this layer never
+    forwarded it**, so the documented escape was unreachable from an
+    unattended night. Measured 2026-09-21 on Fran's campaign: pack 16/16,
+    "nothing in the pack is free to discard", six room plans in a row and not
+    one input sent, because the default policy waits for a human to empty a
+    slot by hand.
+    """
+    import tools.overnight as overnight
+
+    n = object.__new__(overnight.Overnight)
+    n.say = lambda *_a, **_k: None
+    n.dry = True
+    n.model = "m.zip"
+    n.full_pack = "abandon"
+    n.survival = 12
+    seen = {}
+
+    class _Proc:
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    def _popen(cmd, **_kw):
+        seen["cmd"] = list(cmd)
+        return _Proc()
+
+    monkeypatch.setattr(overnight.subprocess, "Popen", _popen)
+    monkeypatch.setattr(overnight.time, "sleep", lambda *_a: None)
+    log = tmp_path / "iter.log"
+    log.write_text("", encoding="utf-8")
+    it = overnight.Iteration(n=1, started="now")
+    try:
+        n._play(log, it)
+    except Exception:                       # noqa: BLE001
+        pass                                # the watcher loop is not the point
+    cmd = seen.get("cmd", [])
+    assert "--full-pack" in cmd, cmd
+    assert cmd[cmd.index("--full-pack") + 1] == "abandon", cmd
+    # **And the survival layer, for the same reason.** `run.py --survival`
+    # defaults to 0, which leaves `Advisor._rollout` None and no retreat
+    # verdict is ever computed -- so the bridge cannot decide to leave a raid
+    # at all. Measured 2026-09-21: four heroes down to one, on 3 HP at 157
+    # stress, three fights still routed ahead, not one retreat line logged.
+    assert "--survival" in cmd, cmd
+    assert cmd[cmd.index("--survival") + 1] == "12", cmd
+
+
+def test_play_profile_0_can_only_mean_CONTINUING_it(tmp_path, monkeypatch):
+    """2026-09-23: `--play-profile-0` alone booted the new-campaign flow on
+    slot 1 and walked into the scripted Old Road. The flag implies
+    `--resume --slot 0`."""
+    import tools.overnight as overnight
+    monkeypatch.setattr(overnight, "LOG_DIR", tmp_path, raising=False)
+    n = overnight.Overnight(model="m", max_iterations=1, until=None,
+                            dry=True, play_profile_0=True, slot=1,
+                            resume=False)
+    assert (n.resume, n.slot) == (True, 0)
+
+
+def test_iterations_that_achieve_nothing_stop_the_night(monkeypatch, tmp_path):
+    """Live 2026-09-25: a stuck raid ended thirteen iterations in a row at
+    189 s, 9 actions, no raid, no embark -- slower than INSTANT_SECONDS, so the
+    instant guard never fired. The same failure repeating must stop the night
+    whatever each attempt cost."""
+    import tools.overnight as overnight
+    from bridge import window as window_mod
+
+    n = object.__new__(overnight.Overnight)
+    said = []
+    n.say = said.append
+    n.dry = False
+    n.run_id = "t"
+    n.max_iterations = 40
+    n.until = None
+    n.iterations = []
+    calls = []
+
+    def fake_iterate(i):
+        calls.append(i)
+        return overnight.Iteration(n=i, seconds=189.0, actions=9,
+                                   outcome="no-raid-end")
+
+    monkeypatch.setattr(overnight, "steam_is_running", lambda: True)
+    monkeypatch.setattr(window_mod, "keep_display_awake", lambda on=True: True)
+    monkeypatch.setattr(overnight, "STOP_FILE", tmp_path / "STOP")
+    monkeypatch.setattr(n, "_sweep_orphans", lambda: None, raising=False)
+    monkeypatch.setattr(n, "iterate", fake_iterate, raising=False)
+    monkeypatch.setattr(n, "_write_summary", lambda: None, raising=False)
+    n.summary_path = tmp_path / "s.json"
+    n.run()
+    assert len(calls) == overnight.IDLE_FAILURES, calls
+    assert any("one failure repeating" in s for s in said)
+
+
+
 if __name__ == "__main__":                                  # pragma: no cover
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
             print(name)
             pytest.main([__file__, "-k", name, "-q"])
+
